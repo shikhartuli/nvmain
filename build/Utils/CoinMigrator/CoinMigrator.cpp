@@ -1,0 +1,1 @@
+/home/stuli/NVMain/Utils/CoinMigrator/CoinMigrator.cpp

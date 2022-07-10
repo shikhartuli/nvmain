@@ -85,6 +85,7 @@ class NVMain : public NVMObject
     Config **channelConfig;
     MemoryController **memoryControllers;
     AddressTranslator *translator;
+    SimInterface *simInterface;
 
     ncounter_t totalReadRequests;
     ncounter_t totalWriteRequests;

@@ -46,15 +46,7 @@
 #include <iostream>
 #include <limits>
 
-/*
- * Using -O3 in gcc causes the popcount methods to return incorrect values.
- * Disable optimizations in these methods using compiler specific attributes.
- */
-#if defined(__clang__)
-#define NO_OPT __attribute__((optnone))
-#else
-#define NO_OPT __attribute__((optimize("0")))
-#endif
+#define WriteCellData WriteCellData2
 
 using namespace NVM;
 
@@ -71,7 +63,8 @@ SubArray::SubArray( )
 
     state = SUBARRAY_CLOSED;
     lastActivate = 0;
-    openRow = 0;
+    //openRow = 0;
+    openRows.clear();
 
     nextActivate = 0;
     nextPrecharge = 0;
@@ -279,11 +272,12 @@ bool SubArray::Activate( NVMainRequest *request )
     request->address.GetTranslatedAddress( &activateRow, NULL, NULL, NULL, NULL, NULL );
 
     /* Check if we need to cancel or pause a write to service this request. */
-    CheckWritePausing( );
+    // decouple read/write
+    //CheckWritePausing( );
 
     /* TODO: Can we remove this sanity check and totally trust IsIssuable()? */
     /* sanity check */
-    if( nextActivate > GetEventQueue()->GetCurrentCycle() )
+    /*if( nextActivate > GetEventQueue()->GetCurrentCycle() )
     {
         std::cerr << "NVMain Error: SubArray violates ACTIVATION timing constraint!"
             << std::endl;
@@ -294,35 +288,110 @@ bool SubArray::Activate( NVMainRequest *request )
         std::cerr << "NVMain Error: try to open a subarray that is not idle!"
             << std::endl;
         return false;
+    }*/
+
+    bool rowhit = false;
+    for (auto it = openRows.begin(); it != openRows.end(); it++)
+    {
+        if (it->openRow == activateRow)
+        {
+            rowhit = true;
+            break;
+        }
+    }
+    if (rowhit)
+    {
+	if (MemoryController::algorithm == LRU)
+	{
+	    for (auto it = openRows.begin(); it != openRows.end(); it++)
+	    {
+		it->age++;
+		if (it->openRow == activateRow)
+		    it->age = 0;
+	    }	
+	}
+	return true;
     }
 
-    /* Update timing constraints */
-    nextPrecharge = MAX( nextPrecharge, 
-                         GetEventQueue()->GetCurrentCycle() 
-                             + MAX( p->tRCD, p->tRAS ) );
-
-    nextRead = MAX( nextRead, 
-                    GetEventQueue()->GetCurrentCycle() 
-                        + p->tRCD - p->tAL );
-
-    nextWrite = MAX( nextWrite, 
-                     GetEventQueue()->GetCurrentCycle() 
-                         + p->tRCD - p->tAL );
-
-    nextPowerDown = MAX( nextPowerDown, 
-                         GetEventQueue()->GetCurrentCycle() 
-                             + MAX( p->tRCD, p->tRAS ) );
-
-    /* the request is deleted by RequestComplete() */
-    request->owner = this;
-    GetEventQueue( )->InsertEvent( EventResponse, this, request, 
-                    GetEventQueue()->GetCurrentCycle() + p->tRCD );
 
     /* 
      * The relative row number is record rather than the absolute row number 
      * within the subarray
      */
-    openRow = activateRow;
+    //openRow = activateRow;
+    RowBuffer tmp;
+    tmp.openRow = activateRow;
+    tmp.age = 0;
+    tmp.isread = true;
+    tmp.WriteRequest = NULL;
+
+    if (MemoryController::algorithm == FIFO)
+    {
+	if (openRows.size() == MemoryController::RowBufferEntry)
+	{
+	    if (!openRows.begin()->isread)
+	    {
+		// write op is only write to the memory
+		// when it is erased in the unibuffer
+		// so we now write it back to the memory
+		RowBuffer *tmp = &(*openRows.begin());
+		WriteBack(tmp);	
+	    }
+	    openRows.erase(openRows.begin());
+	}
+    }
+    else if (MemoryController::algorithm == LRU)
+    {
+	if (openRows.size() == MemoryController::RowBufferEntry)
+	{
+	    RowBuffer *oldest = &(*openRows.begin());
+            int ind = 0; 
+            int old = 0; 
+            for (auto it = openRows.begin(); it != openRows.end(); it++)
+            {   
+                it->age++;
+                if (it->age > oldest->age)
+                {   
+                    oldest = &(*it);
+                    old = ind;
+                }
+                ind++;
+            }
+	    if (!oldest->isread)
+	    {
+		// write op is only write to the memory
+		// when it is erased in the unibuffer
+		// so we now write it back to the memory
+		WriteBack(oldest);
+	    }
+	    openRows.erase(openRows.begin() + old);
+	}
+    }
+    //else
+	//panic("Unknown row buffer replacement algorithm!");
+    openRows.push_back(tmp);
+
+    /* Update timing constraints */
+    nextPrecharge = MAX( nextPrecharge,
+                         GetEventQueue()->GetCurrentCycle()
+                             + MAX( p->tRCD, p->tRAS ) );
+
+    nextRead = MAX( nextRead,
+                    GetEventQueue()->GetCurrentCycle()
+                        + p->tRCD - p->tAL );
+
+    nextWrite = MAX( nextWrite,
+                     GetEventQueue()->GetCurrentCycle()
+                         + p->tRCD - p->tAL );
+
+    nextPowerDown = MAX( nextPowerDown,
+                         GetEventQueue()->GetCurrentCycle()
+                             + MAX( p->tRCD, p->tRAS ) );
+   
+    /* the request is deleted by RequestComplete() */
+    request->owner = this;
+    GetEventQueue( )->InsertEvent( EventResponse, this, request,
+                    GetEventQueue()->GetCurrentCycle() + p->tRCD );
 
     state = SUBARRAY_OPEN;
     writeCycle = false;
@@ -365,10 +434,21 @@ bool SubArray::Read( NVMainRequest *request )
     request->address.GetTranslatedAddress( &readRow, NULL, NULL, NULL, NULL, NULL );
 
     /* Check if we need to cancel or pause a write to service this request. */
-    CheckWritePausing( );
+    // read/write are decoupled
+    //CheckWritePausing( );
 
     /* TODO: Can we remove this sanity check and totally trust IsIssuable()? */
     /* sanity check */
+    bool rowhit = false;
+    for (auto it = openRows.begin(); it != openRows.end(); it++)
+    {
+	if (it->openRow == readRow)
+	{
+	    rowhit = true;
+	    break;
+	}
+    }
+
     if( nextRead > GetEventQueue()->GetCurrentCycle() )
     {
         std::cerr << "NVMain Error: Subarray violates READ timing constraint!"
@@ -381,7 +461,7 @@ bool SubArray::Read( NVMainRequest *request )
             << std::endl;
         return false;
     }
-    else if( readRow != openRow )
+    else if( !rowhit )
     {
         std::cerr << "NVMain Error: try to read a row that is not opened in a subarray!"
             << std::endl;
@@ -396,12 +476,13 @@ bool SubArray::Read( NVMainRequest *request )
     {
         nextActivate = MAX( nextActivate, 
                             GetEventQueue()->GetCurrentCycle()
-                                + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+                                //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
                                 + p->tAL + p->tRTP + p->tRP + decLat );
 
         nextPrecharge = MAX( nextPrecharge, nextActivate );
         nextRead = MAX( nextRead, nextActivate );
-        nextWrite = MAX( nextWrite, nextActivate );
+	// decouple read/write
+        //nextWrite = MAX( nextWrite, nextActivate );
 
         NVMainRequest *preReq = new NVMainRequest( );
         *preReq = *request;
@@ -410,30 +491,32 @@ bool SubArray::Read( NVMainRequest *request )
         /* insert the event to issue the implicit precharge */ 
         GetEventQueue( )->InsertEvent( EventResponse, this, preReq, 
                         GetEventQueue()->GetCurrentCycle() + p->tAL + p->tRTP + decLat
-                        + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1) );
+                        /*+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)*/ );
     }
     else
     {
         nextPrecharge = MAX( nextPrecharge, 
                              GetEventQueue()->GetCurrentCycle() 
-                                 + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                                 + p->tAL + p->tBURST + p->tRTP - p->tCCD + decLat );
+                                 //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+                                 + p->tAL /*+ p->tBURST*/ + p->tRTP - p->tCCD + decLat );
 
         nextRead = MAX( nextRead, 
                         GetEventQueue()->GetCurrentCycle() 
-                            + MAX( p->tBURST, p->tCCD ) * request->burstCount );
+			    + p->tCCD );
+                            //+ MAX( p->tBURST, p->tCCD ) * request->burstCount );
 
-        nextWrite = MAX( nextWrite, 
-                         GetEventQueue()->GetCurrentCycle() 
-                             + MAX( p->tBURST, p->tCCD ) * (request->burstCount  - 1)
-                             + p->tCAS + p->tBURST + p->tRTRS - p->tCWD + decLat );
+	// decouple read/write
+        //nextWrite = MAX( nextWrite, 
+        //                 GetEventQueue()->GetCurrentCycle() 
+        //                     + MAX( p->tBURST, p->tCCD ) * (request->burstCount  - 1)
+        //                     + p->tCAS + p->tBURST + p->tRTRS - p->tCWD + decLat );
     }
 
     /* Read->Powerdown is typical the same for READ and READ_PRECHARGE. */
     nextPowerDown = MAX( nextPowerDown,
                          GetEventQueue()->GetCurrentCycle()
-                            + MAX( p->tBURST, p->tCCD ) * (request->burstCount  - 1)
-                            + p->tCAS + p->tAL + p->tBURST + 1 + decLat );
+                            //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount  - 1)
+                            + p->tCAS + p->tAL /*+ p->tBURST*/ + 1 + decLat );
 
     /*
      *  Data is placed on the bus starting from tCAS and is complete after tBURST.
@@ -452,7 +535,7 @@ bool SubArray::Read( NVMainRequest *request )
 
     /* Notify owner of read completion as well */
     GetEventQueue( )->InsertEvent( EventResponse, this, request, 
-            GetEventQueue()->GetCurrentCycle() + p->tCAS + p->tBURST + decLat );
+            GetEventQueue()->GetCurrentCycle() + p->tCAS /*+ p->tBURST*/ + decLat );
 
 
     /* Calculate energy */
@@ -489,13 +572,16 @@ bool SubArray::Read( NVMainRequest *request )
         if( !conf->GetSimInterface( )->GetDataAtAddress( 
                     request->address.GetPhysicalAddress( ), NULL ) )
         {
+            //std::cout << "Setting data block for 0x" << std::hex << request->address.GetPhysicalAddress( )
+            //          << std::dec << " to " << request->data << std::endl;
             conf->GetSimInterface( )->SetDataAtAddress( 
                     request->address.GetPhysicalAddress( ), request->data );
         }
     }
 
     reads++;
-    dataCycles += p->tBURST;
+    dataCycles += 1;
+    //dataCycles += p->tBURST;
     
     return true;
 }
@@ -506,14 +592,24 @@ bool SubArray::Read( NVMainRequest *request )
 bool SubArray::Write( NVMainRequest *request )
 {
     uint64_t writeRow;
-    ncycle_t writeTimer;
-    ncycle_t encLat = 0, endrLat = 0;
-    ncounter_t numUnchangedBits = 0;
 
     request->address.GetTranslatedAddress( &writeRow, NULL, NULL, NULL, NULL, NULL );
 
     /* TODO: Can we remove this sanity check and totally trust IsIssuable()? */
     /* sanity check */
+    bool rowhit = false;
+    for (auto it = openRows.begin(); it != openRows.end(); it++)
+    {
+	if (it->openRow == writeRow)
+	{
+	    rowhit = true;
+	    it->isread = false;
+	    it->WriteRequest = new NVMainRequest;
+	    *(it->WriteRequest) = *request;
+	    break;
+	}
+    }
+
     if( nextWrite > GetEventQueue()->GetCurrentCycle() )
     {
         std::cerr << "NVMain Error: Subarray violates WRITE timing constraint!"
@@ -526,93 +622,16 @@ bool SubArray::Write( NVMainRequest *request )
             << std::endl;
         return false;
     }
-    else if( writeRow != openRow )
+    else if( !rowhit  )
     {
         std::cerr << "NVMain Error: try to write a row that is not opened "
             << "in a subarray!" << std::endl;
         return false;
     }
 
-    if( writeMode == WRITE_THROUGH )
-    {
-        encLat = (dataEncoder ? dataEncoder->Write( request ) : 0);
-        endrLat = UpdateEndurance( request );
 
-        /* Count the number of bits modified. */
-        if( !p->WriteAllBits )
-        {
-            uint8_t *bitCountData = new uint8_t[request->data.GetSize()];
-
-            for( uint64_t bitCountByte = 0; bitCountByte < request->data.GetSize(); bitCountByte++ )
-            {
-                bitCountData[bitCountByte] = request->data.GetByte( bitCountByte )
-                                           ^ request->oldData.GetByte( bitCountByte );
-            }
-
-            ncounter_t bitCountWords = request->data.GetSize()/4;
-
-            ncounter_t numChangedBits = CountBitsMLC1( 1, (uint32_t*)bitCountData, bitCountWords );
-
-            assert( request->data.GetSize()*8 >= numChangedBits );
-            numUnchangedBits = request->data.GetSize()*8 - numChangedBits;
-        }
-    }
-
-    /* Determine the write time. */
-    writeTimer = WriteCellData( request ); // Assume write-through.
-    if( request->flags & NVMainRequest::FLAG_PAUSED ) // This was paused, restart with remaining time
-    {
-        writeTimer = request->writeProgress;
-        request->flags &= ~NVMainRequest::FLAG_PAUSED; // unpause this
-    }
-
-    if( request->flags & NVMainRequest::FLAG_CANCELLED )
-    {
-        request->flags &= ~NVMainRequest::FLAG_CANCELLED; // restart this
-    }
-
-    if( writeMode == WRITE_BACK && writeCycle )
-    {
-        writeTimer = 0;
-
-        NVMainRequest *requestCopy = new NVMainRequest( );
-        *requestCopy = *request;
-        writeBackRequests.push_back( requestCopy );
-    }
-
-    /* Write canceling/pausing only for write-through memory */
-    if( writeMode == WRITE_THROUGH )
-        request->writeProgress = writeTimer;
-
-    /* Save the next* state incause we cancel a write. */
-    nextActivatePreWrite = nextActivate;
-    nextPrechargePreWrite = nextPrecharge;
-    nextReadPreWrite = nextRead;
-    nextWritePreWrite = nextWrite;
-    nextPowerDownPreWrite = nextPowerDown;
-
-    if( writeMode == WRITE_THROUGH )
-    {
-        writeTimer += encLat + endrLat;
-
-        averageWriteTime = ((averageWriteTime * static_cast<double>(measuredWriteTimes)) + static_cast<double>(writeTimer)) 
-                         / (static_cast<double>(measuredWriteTimes) + 1.0);
-        measuredWriteTimes++;
-    }
-
-    /* Update timing constraints */
     if( request->type == WRITE_PRECHARGE )
     {
-        nextActivate = MAX( nextActivate, 
-                            GetEventQueue()->GetCurrentCycle()
-                            + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                            + p->tAL + p->tCWD + p->tBURST 
-                            + writeTimer + p->tWR + p->tRP );
-
-        nextPrecharge = MAX( nextPrecharge, nextActivate );
-        nextRead = MAX( nextRead, nextActivate );
-        nextWrite = MAX( nextWrite, nextActivate );
-
         /* close the subarray */
         NVMainRequest *preReq = new NVMainRequest( );
         *preReq = *request;
@@ -621,24 +640,8 @@ bool SubArray::Write( NVMainRequest *request )
         /* insert the event to issue the implicit precharge */ 
         GetEventQueue( )->InsertEvent( EventResponse, this, preReq, 
             GetEventQueue()->GetCurrentCycle() 
-            + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-            + p->tAL + p->tCWD + p->tBURST + writeTimer + p->tWR );
-    }
-    else
-    {
-        nextPrecharge = MAX( nextPrecharge, 
-                             GetEventQueue()->GetCurrentCycle() 
-                             + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                             + p->tAL + p->tCWD + p->tBURST + writeTimer + p->tWR );
-
-        nextRead = MAX( nextRead, 
-                        GetEventQueue()->GetCurrentCycle() 
-                        + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                        + p->tCWD + p->tBURST + p->tWTR + writeTimer );
-
-        nextWrite = MAX( nextWrite, 
-                         GetEventQueue()->GetCurrentCycle() 
-                         + MAX( p->tBURST, p->tCCD ) * request->burstCount + writeTimer );
+            //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+            + p->tAL + p->tCWD /*+ p->tBURST + writeTimer*/ + p->tWR );
     }
 
     nextPowerDown = MAX( nextPowerDown, nextPrecharge );
@@ -648,9 +651,14 @@ bool SubArray::Write( NVMainRequest *request )
     writeRequest = request;
     // TODO: Should we disallow pausing during the data burst?
     writeStart = GetEventQueue()->GetCurrentCycle();
-    writeEnd = GetEventQueue()->GetCurrentCycle() + writeTimer;
-    writeEventTime = GetEventQueue()->GetCurrentCycle() + p->tCWD 
-                     + MAX( p->tBURST, p->tCCD ) * request->burstCount + writeTimer;
+    writeEnd = GetEventQueue()->GetCurrentCycle(); // + writeTimer;
+    writeEventTime = GetEventQueue()->GetCurrentCycle() + p->tCWD
+		     + p->tCCD; // + writeTimer; 
+                     //+ MAX( p->tBURST, p->tCCD ) * request->burstCount + writeTimer;
+
+    //std::cout << GetEventQueue()->GetCurrentCycle() << " write start 0x" << std::hex
+    //          << request->address.GetPhysicalAddress( ) << std::dec << " done at "
+    //          << writeEnd << std::endl;
 
     /* The parent has our hook in the children list, we need to find this. */
     std::vector<NVMObject_hook *>& children = GetParent( )->GetTrampoline( )->GetChildren( );
@@ -685,6 +693,136 @@ bool SubArray::Write( NVMainRequest *request )
     /* Notify owner of write completion as well */
     GetEventQueue( )->InsertEvent( writeEvent, writeEventTime );
 
+    writeCycle = true;
+
+    writes++;
+    dataCycles =+ 1;
+    //dataCycles += p->tBURST;
+    
+    return true;
+}
+
+// With unibuffer, we only write to the memory
+// when the entry is erased from row buffer
+void SubArray::WriteBack(RowBuffer *Entry)
+{
+    NVMainRequest *request = Entry->WriteRequest;
+    ncycle_t writeTimer;
+    ncycle_t encLat = 0, endrLat = 0;
+    ncounter_t numUnchangedBits = 0;
+
+    if( writeMode == WRITE_THROUGH )
+    {
+        encLat = (dataEncoder ? dataEncoder->Write( request ) : 0);
+        endrLat = UpdateEndurance( request );
+
+        /* Count the number of bits modified. */
+        if( !p->WriteAllBits )
+        {
+            uint8_t *bitCountData = new uint8_t[request->data.GetSize()];
+
+            for( uint64_t bitCountByte = 0; bitCountByte < request->data.GetSize(); bitCountByte++ )
+            {
+                bitCountData[bitCountByte] = request->data.GetByte( bitCountByte )
+                                           ^ request->oldData.GetByte( bitCountByte );
+            }
+
+            ncounter_t bitCountWords = request->data.GetSize()/4;
+
+            ncounter_t numChangedBits = CountBitsMLC1( 1, (uint32_t*)bitCountData, bitCountWords );
+
+            assert( request->data.GetSize()*8 > numChangedBits );
+            numUnchangedBits = request->data.GetSize()*8 - numChangedBits;
+        }
+    }
+
+    /* Determine the write time. */
+    writeTimer = WriteCellData( request ); // Assume write-through.
+    if( request->flags & NVMainRequest::FLAG_PAUSED ) // This was paused, restart with remaining time
+    {
+        writeTimer = request->writeProgress;
+        request->flags &= ~NVMainRequest::FLAG_PAUSED; // unpause this
+
+        //std::cout << "Restarted request 0x" << std::hex << request->address.GetPhysicalAddress( )
+        //          << std::dec << " with " << writeTimer << " cycles left." << std::endl;
+    }
+    else
+    {
+        writeTimer = WriteCellData( request ); // Assume write-through.
+    }
+
+    if( request->flags & NVMainRequest::FLAG_CANCELLED )
+    {
+        request->flags &= ~NVMainRequest::FLAG_CANCELLED; // restart this
+
+        //std::cout << "Restarted CANCELLED request 0x" << std::hex << request->address.GetPhysicalAddress( )
+        //          << std::dec << "... " << request->cancellations << " cancels so far" << std::endl;
+    }    
+
+    if( writeMode == WRITE_BACK && writeCycle )
+    {   
+        writeTimer = 0;
+            
+        NVMainRequest *requestCopy = new NVMainRequest( );
+        *requestCopy = *request;
+        writeBackRequests.push_back( requestCopy );
+    }
+
+    /* Write canceling/pausing only for write-through memory */
+    if( writeMode == WRITE_THROUGH )
+        request->writeProgress = writeTimer;
+
+    /* Save the next* state incause we cancel a write. */
+    nextActivatePreWrite = nextActivate;
+    nextPrechargePreWrite = nextPrecharge;
+    nextReadPreWrite = nextRead;
+    nextWritePreWrite = nextWrite;
+    nextPowerDownPreWrite = nextPowerDown;
+
+    if( writeMode == WRITE_THROUGH )
+    {
+        writeTimer += encLat + endrLat;
+
+        averageWriteTime = ((averageWriteTime * static_cast<double>(measuredWriteTimes)) + static_cast<double>(writeTimer))
+                         / (static_cast<double>(measuredWriteTimes) + 1.0);
+        measuredWriteTimes++;
+    }
+
+    /* Update timing constraints */
+    if( request->type == WRITE_PRECHARGE )
+    {
+        nextActivate = MAX( nextActivate,
+                            GetEventQueue()->GetCurrentCycle()
+                            //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1) 
+                            + p->tAL + p->tCWD //+ p->tBURST 
+                            + writeTimer + p->tWR + p->tRP );
+
+	nextPrecharge = MAX( nextPrecharge, nextActivate );
+        //decouple read/write
+        //nextRead = MAX( nextRead, nextActivate );  
+        nextWrite = MAX( nextWrite, nextActivate );
+    }
+    else
+    {
+        nextPrecharge = MAX( nextPrecharge, 
+                             GetEventQueue()->GetCurrentCycle() 
+                             //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+                             + p->tAL + p->tCWD /*+ p->tBURST*/ + writeTimer + p->tWR );
+	
+        //decouple read/write
+        //nextRead = MAX( nextRead, 
+        //		  GetEventQueue()->GetCurrentCycle() 
+        //		  + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+        //		  + p->tCWD + p->tBURST + p->tWTR + writeTimer );
+
+        nextWrite = MAX( nextWrite,
+                         GetEventQueue()->GetCurrentCycle()
+                         + p->tCCD + writeTimer );
+                         //+ MAX( p->tBURST, p->tCCD ) * request->burstCount + writeTimer );
+    }
+
+    nextPowerDown = MAX( nextPowerDown, nextPrecharge );
+
     /* Calculate energy. */
     if( p->EnergyModel == "current" )
     {
@@ -701,12 +839,6 @@ bool SubArray::Write( NVMainRequest *request )
         burstEnergy += p->Ewr;
     }
 
-    writeCycle = true;
-
-    writes++;
-    dataCycles += p->tBURST;
-    
-    return true;
 }
 
 /*
@@ -764,7 +896,8 @@ bool SubArray::Precharge( NVMainRequest *request )
               GetEventQueue()->GetCurrentCycle() + writeTimer );
 
     /* set the subarray under precharging */
-    state = SUBARRAY_PRECHARGING;
+    if (openRows.size()==0)
+    	state = SUBARRAY_PRECHARGING;
 
     return true;
 }
@@ -783,7 +916,7 @@ bool SubArray::Refresh( NVMainRequest* request )
             << std::endl;
         return false;
     }
-    else if( (state != SUBARRAY_CLOSED && p->UsePrecharge) )
+    else if( state != SUBARRAY_CLOSED )
     {
         std::cerr << "NVMain Error: try to refresh a subarray that is not idle " 
             << std::endl;
@@ -864,6 +997,8 @@ void SubArray::CheckWritePausing( )
                                      + writePercent) / static_cast<double>(measuredProgresses + 1);
         measuredProgresses++;
 
+        //std::cout << "GOT A READ DURING WRITE; PROGRESS IS " << writePercent << std::endl;
+
         /* Pause after 40%, cancel otherwise. */
         if( writePercent > p->PauseThreshold )
         {
@@ -926,7 +1061,7 @@ bool SubArray::BetweenWriteIterations( )
     return rv;
 }
 
-ncycle_t SubArray::WriteCellData( NVMainRequest *request )
+ncycle_t SubArray::WriteCellData2( NVMainRequest *request )
 {
     writeIterationStarts.clear( );
     uint32_t *rawData = reinterpret_cast<uint32_t*>(request->data.rawData);
@@ -1067,7 +1202,7 @@ ncycle_t SubArray::WriteCellData( NVMainRequest *request )
         }
         else
         {
-            oncePulseDelay = MAX(p->tWP0, p->tWP1);
+            assert(false);
         }
 
         /* Insert times for write cancellation and pausing. */
@@ -1121,16 +1256,78 @@ bool SubArray::IsIssuable( NVMainRequest *req, FailReason *reason )
     if( nextCommand != CMD_NOP )
         return false;
 
+    bool rowhit = false;
+    for (auto it = openRows.begin(); it != openRows.end(); it++)
+    {
+        if (it->openRow == opRow)
+        {
+            rowhit = true;
+            break;
+        }
+    }
+
+    if (!rowhit)
+    {
+	if (req->type == READ || req->type == READ_PRECHARGE || req->type == WRITE || req->type == WRITE_PRECHARGE)
+	{
+    	    RowBuffer tmp;
+    	    tmp.openRow = opRow;
+    	    tmp.age = 0;
+   	    tmp.isread = req->type == READ || req->type == READ_PRECHARGE;
+    	    tmp.WriteRequest = NULL;
+	    if (!tmp.isread)
+		tmp.WriteRequest = req;
+
+    	    if (MemoryController::algorithm == FIFO)
+    	    {
+        	if (openRows.size() == MemoryController::RowBufferEntry)
+        	{
+            	    if (!openRows.begin()->isread)
+            	    {
+                        RowBuffer *tmp = &(*openRows.begin());
+                        WriteBack(tmp);
+                    }
+                    openRows.erase(openRows.begin());
+                }
+            }
+	    else if (MemoryController::algorithm == LRU)
+    	    {
+        	if (openRows.size() == MemoryController::RowBufferEntry)
+        	{
+            	    RowBuffer *oldest = &(*openRows.begin());
+            	    int ind = 0;
+            	    int old = 0;
+            	    for (auto it = openRows.begin(); it != openRows.end(); it++)
+            	    {
+                	it->age++;
+                	if (it->age > oldest->age)
+                	{
+                    	    oldest = &(*it);
+                    	    old = ind;
+                	}
+                	ind++;
+            	    }
+            	    if (!oldest->isread)
+            	    {
+                	WriteBack(oldest);
+            	    }
+            	    openRows.erase(openRows.begin() + old);
+        	}
+    	    }
+    	    openRows.push_back(tmp);
+	}
+    }
+
     if( req->type == ACTIVATE )
     {
         if( nextActivate > (GetEventQueue()->GetCurrentCycle()) /* if it is too early to open */
-            || (p->UsePrecharge && state != SUBARRAY_CLOSED)   /* or, the subarray needs a precharge */
-            || (p->WritePausing && isWriting && writeRequest->flags & NVMainRequest::FLAG_FORCED) /* or, write can't be paused. */
-            || (p->WritePausing && isWriting && !(req->flags & NVMainRequest::FLAG_PRIORITY)) ) /* Prevent normal row buffer misses from pausing writes at odd times. */
+            )//|| (p->UsePrecharge && state != SUBARRAY_CLOSED)   /* or, the subarray needs a precharge */
+            //|| (p->WritePausing && isWriting && writeRequest->flags & NVMainRequest::FLAG_FORCED) /* or, write can't be paused. */
+            //|| (p->WritePausing && isWriting && !(req->flags & NVMainRequest::FLAG_PRIORITY)) ) /* Prevent normal row buffer misses from pausing writes at odd times. */
         {
             rv = false;
             if( reason ) 
-                reason->reason = SUBARRAY_TIMING;
+                reason->reason = SUBARRAY_TIMING_1;
         }
 
         if( rv == false )
@@ -1147,23 +1344,23 @@ bool SubArray::IsIssuable( NVMainRequest *req, FailReason *reason )
     {
         if( nextRead > (GetEventQueue()->GetCurrentCycle()) /* if it is too early to read */
             || state != SUBARRAY_OPEN  /* or, the subarray is not active */
-            || opRow != openRow        /* or, the target row is not the open row */
-            || ( p->WritePausing && isWriting && writeRequest->flags & NVMainRequest::FLAG_FORCED ) ) /* or, write can't be paused. */
+            || !rowhit                 /* or, the target row is not the open row */
+            )//|| ( p->WritePausing && isWriting && writeRequest->flags & NVMainRequest::FLAG_FORCED ) ) /* or, write can't be paused. */
         {
             rv = false;
             if( reason ) 
-                reason->reason = SUBARRAY_TIMING;
+                reason->reason = SUBARRAY_TIMING_2;
         }
     }
     else if( req->type == WRITE || req->type == WRITE_PRECHARGE )
     {
         if( nextWrite > (GetEventQueue()->GetCurrentCycle()) /* if it is too early to write */
             || state != SUBARRAY_OPEN  /* or, the subarray is not active */          
-            || opRow != openRow )      /* or, the target row is not the open row */
+            || !rowhit )	       /* or, the target row is not the open row */
         {
             rv = false;
             if( reason ) 
-                reason->reason = SUBARRAY_TIMING;
+                reason->reason = SUBARRAY_TIMING_3;
         }
     }
     else if( req->type == PRECHARGE || req->type == PRECHARGE_ALL )
@@ -1174,7 +1371,7 @@ bool SubArray::IsIssuable( NVMainRequest *req, FailReason *reason )
         {
             rv = false;
             if( reason ) 
-                reason->reason = SUBARRAY_TIMING;
+                reason->reason = SUBARRAY_TIMING_4;
         }
     }
     else if( req->type == POWERDOWN_PDA 
@@ -1186,7 +1383,7 @@ bool SubArray::IsIssuable( NVMainRequest *req, FailReason *reason )
         {
             rv = false;
             if( reason )
-                reason->reason = SUBARRAY_TIMING;
+                reason->reason = SUBARRAY_TIMING_5;
         }
     }
     else if( req->type == POWERUP )
@@ -1196,11 +1393,11 @@ bool SubArray::IsIssuable( NVMainRequest *req, FailReason *reason )
     else if( req->type == REFRESH )
     {
         if( nextActivate > ( GetEventQueue()->GetCurrentCycle() ) /* if it is too early to refresh */ 
-            || (state != SUBARRAY_CLOSED && p->UsePrecharge) ) /* or, the subarray is not idle */
+            || state != SUBARRAY_CLOSED ) /* or, the subarray is not idle */
         {
             rv = false;
             if( reason )
-              reason->reason = SUBARRAY_TIMING;
+              reason->reason = SUBARRAY_TIMING_6;
         }
     }
     else
@@ -1236,7 +1433,8 @@ bool SubArray::IssueCommand( NVMainRequest *req )
         switch( req->type )
         {
             case ACTIVATE:
-                rv = this->Activate( req );
+		//if (p->UsePrecharge && state == SUBARRAY_CLOSED)
+                    rv = this->Activate( req );
                 break;
             
             case READ:
@@ -1272,6 +1470,9 @@ bool SubArray::RequestComplete( NVMainRequest *req )
 {
     if( req->type == WRITE || req->type == WRITE_PRECHARGE )
     {
+        //std::cout << GetEventQueue()->GetCurrentCycle() << " write done 0x" << std::hex
+        //          << req->address.GetPhysicalAddress( ) << std::dec << std::endl;
+
         /*  
          *  Write-to-write timing causes new writes to come in before the previous completes.
          *  Don't set writing to false unless this hasn't happened (writeRequest would be the
@@ -1309,7 +1510,8 @@ bool SubArray::RequestComplete( NVMainRequest *req )
             case READ_PRECHARGE:
             case WRITE_PRECHARGE:
                 req->type = PRECHARGE;
-                state = SUBARRAY_PRECHARGING;
+		if (openRows.size()==0)
+                    state = SUBARRAY_PRECHARGING;
 
                 /* insert the implicit precharge */
                 GetEventQueue( )->InsertEvent( EventResponse, this, req, 
@@ -1317,37 +1519,25 @@ bool SubArray::RequestComplete( NVMainRequest *req )
                 break;
 
             case PRECHARGE:
+		if (openRows.size()==0)
+		    state = SUBARRAY_CLOSED;
+		precharges++;
+                delete req;
+                break;
             case PRECHARGE_ALL:
                 /* close the subarray, increment the statistic number */
                 state = SUBARRAY_CLOSED;
-                openRow = p->ROWS;
+                //openRow = p->ROWS;
+                openRows.clear();
                 precharges++;
                 delete req;
                 break;
 
             case REFRESH:
                 /* close the subarray, increment the statistic number */
-                /* Note: If precharge is not used, we still assume that
-                 * the state is open. This is because there may or may not
-                 * be some form of buffered output, which would presumably
-                 * hold the previously sensed data after a refresh command.
-                 */
-                if( p->UsePrecharge )
-                {
-                    state = SUBARRAY_CLOSED;
-                    openRow = p->ROWS;
-                }
-                else
-                {
-                    /* The memory controller will not update effectiveRow
-                     * if precharge is not used. To hold the assumption of
-                     * buffered output, we should leave the openRow the same.
-                     * If this assumption is broken, the refresh logic in
-                     * the memory controller must reset the effective row
-                     * when a refresh is pushed to the command queue.
-                     */
-                    state = SUBARRAY_OPEN;
-                }
+                state = SUBARRAY_CLOSED;
+                //openRow = p->ROWS;
+                openRows.clear();
                 refreshes++;
                 delete req;
                 break;
@@ -1494,7 +1684,7 @@ void SubArray::Cycle( ncycle_t )
  *  can be 0 (binary 00), 1 (binary 01), 2 (binary 10) or 3
  *  (binary 11).
  */
-ncounter_t NO_OPT SubArray::Count32MLC2( uint8_t value, uint32_t data )
+ncounter_t __attribute__((optimize("0"))) SubArray::Count32MLC2( uint8_t value, uint32_t data )
 {
     /*
      *  This method counts the number of 11 pairs, so we need to convert
@@ -1520,7 +1710,7 @@ ncounter_t NO_OPT SubArray::Count32MLC2( uint8_t value, uint32_t data )
 }
 
 
-ncounter_t NO_OPT SubArray::CountBitsMLC2( uint8_t value, uint32_t *data, ncounter_t words )
+ncounter_t __attribute__((optimize("0"))) SubArray::CountBitsMLC2( uint8_t value, uint32_t *data, ncounter_t words )
 {
     ncounter_t count = 0;
 
@@ -1533,7 +1723,7 @@ ncounter_t NO_OPT SubArray::CountBitsMLC2( uint8_t value, uint32_t *data, ncount
 }
 
 
-ncounter_t NO_OPT SubArray::Count32MLC1( uint32_t data )
+ncounter_t __attribute__((optimize("0"))) SubArray::Count32MLC1( uint32_t data )
 {
     /*
      *  Count the number of ones in this value using some
@@ -1548,7 +1738,7 @@ ncounter_t NO_OPT SubArray::Count32MLC1( uint32_t data )
 }
 
 
-ncounter_t NO_OPT SubArray::CountBitsMLC1( uint8_t value, uint32_t *data, ncounter_t words )
+ncounter_t __attribute__((optimize("0"))) SubArray::CountBitsMLC1( uint8_t value, uint32_t *data, ncounter_t words )
 {
     ncounter_t count = 0;
 

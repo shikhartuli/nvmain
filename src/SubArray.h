@@ -44,6 +44,7 @@
 #include "include/NVMAddress.h"
 #include "include/NVMainRequest.h"
 #include "src/Params.h"
+#include "src/MemoryController.h"
 
 #include <iostream>
 
@@ -88,6 +89,7 @@ class SubArray : public NVMObject
     bool Write( NVMainRequest *request );
     bool Precharge( NVMainRequest *request );
     bool Refresh( NVMainRequest *request );
+    void WriteBack(RowBuffer *Entry);
 
     bool IsIssuable( NVMainRequest *req, FailReason *reason = NULL );
     bool IssueCommand( NVMainRequest *req );
@@ -108,7 +110,8 @@ class SubArray : public NVMObject
     ncycle_t GetNextWrite( ) { return nextWrite; }
     ncycle_t GetNextPrecharge( ) { return nextPrecharge; }
     ncycle_t GetActiveWaits( ) { return actWaits; }
-    uint64_t GetOpenRow( ) { return openRow; }
+    //uint64_t GetOpenRow( ) { return openRow; }
+    std::vector<RowBuffer> GetOpenRow( ) { return openRows; }
 
     void SetName( std::string );
     void SetId( ncounter_t );
@@ -187,7 +190,8 @@ class SubArray : public NVMObject
     ncounter_t reads, writes, activates, precharges, refreshes;
     ncounter_t idleTimer;
 
-    ncounter_t openRow;
+    //ncounter_t openRow;
+    std::vector<RowBuffer> openRows;
 
     DataEncoder *dataEncoder;
     EnduranceModel *endrModel;
@@ -203,7 +207,8 @@ class SubArray : public NVMObject
     std::string wpPauseHisto;
     std::string wpCancelHisto;
 
-    ncycle_t WriteCellData( NVMainRequest *request );
+    ncycle_t WriteCellData1( NVMainRequest *request );
+    ncycle_t WriteCellData2( NVMainRequest *request );
     void CheckWritePausing( );
 
     ncycle_t UpdateEndurance( NVMainRequest *request );

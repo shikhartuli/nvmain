@@ -36,14 +36,20 @@
 
 namespace NVM {
 
-enum FailReasons { UNKNOWN_FAILURE,
-                   OPEN_REFRESH_WAITING,
-                   CLOSED_REFRESH_WAITING,
-                   REFRESH_OPEN_FAILURE,
-                   SUBARRAY_TIMING,
-                   BANK_TIMING,
-                   RANK_TIMING,
-                   UNSUPPORTED_COMMAND
+enum FailReasons { UNKNOWN_FAILURE=0,
+                   OPEN_REFRESH_WAITING=1,
+                   CLOSED_REFRESH_WAITING=2,
+                   REFRESH_OPEN_FAILURE=3,
+                   SUBARRAY_TIMING=4,
+                   BANK_TIMING=5,
+                   RANK_TIMING=6,
+                   UNSUPPORTED_COMMAND=7
+		   ,SUBARRAY_TIMING_1=11,
+		   SUBARRAY_TIMING_2=12,
+		   SUBARRAY_TIMING_3=13,
+		   SUBARRAY_TIMING_4=14,
+		   SUBARRAY_TIMING_5=15,
+		   SUBARRAY_TIMING_6=16
                  };
 
 class FailReason

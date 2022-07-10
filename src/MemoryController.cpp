@@ -66,7 +66,7 @@ MemoryController::MemoryController( )
     wakeupCount = 0;
     lastIssueCycle = 0;
 
-    starvationThreshold = 4;
+    starvationThreshold = 4 * RowBufferEntry; //4;
     subArrayNum = 1;
     starvationCounter = NULL;
     activateQueued = NULL;
@@ -81,6 +81,9 @@ MemoryController::MemoryController( )
     nextRefreshBank = 0;
 
     handledRefresh = std::numeric_limits<ncycle_t>::max( );
+
+    PowerDownCounter = NULL;
+    LastAccess = NULL; 
 }
 
 MemoryController::~MemoryController( )
@@ -137,36 +140,45 @@ void MemoryController::InitQueues( unsigned int numQueues )
         transactionQueues[i].clear( );
 }
 
-void MemoryController::Cycle( ncycle_t /*steps*/ )
+void MemoryController::Cycle( ncycle_t steps )
 {
-    /* 
-     *  Recheck transaction queues for issuables. This may happen when two
-     *  transactions can be issued in the same cycle, but we can't guarantee
-     *  the transaction won't be blocked by the first wake up.
-     */
-    bool scheduled = false;
-    ncycle_t nextWakeup = GetEventQueue( )->GetCurrentCycle( ) + 1;
-
-    /* Skip this if another transaction is scheduled this cycle. */
-    if( GetEventQueue( )->FindEvent( EventCycle, this, NULL, nextWakeup ) )
-        return;
-
-    for( ncounter_t queueIdx = 0; queueIdx < commandQueueCount; queueIdx++ )
+    if( p->EventDriven )
     {
-        if( EffectivelyEmpty( queueIdx )
-            && TransactionAvailable( queueIdx ) )
-        {
-            GetEventQueue( )->InsertEvent( EventCycle, this, nextWakeup, NULL, transactionQueuePriority );
+        /* 
+         *  Recheck transaction queues for issuables. This may happen when two
+         *  transactions can be issued in the same cycle, but we can't guarantee
+         *  the transaction won't be blocked by the first wake up.
+         */
+        bool scheduled = false;
+        ncycle_t nextWakeup = GetEventQueue( )->GetCurrentCycle( ) + 1;
 
-            /* Only allow one request. */
-            scheduled = true;
-            break;
-        }
+        /* Skip this if another transaction is scheduled this cycle. */
+        if( GetEventQueue( )->FindEvent( EventCycle, this, NULL, nextWakeup ) )
+            return;
 
-        if( scheduled ) 
+        for( ncounter_t queueIdx = 0; queueIdx < commandQueueCount; queueIdx++ )
         {
-            break;
+            if( EffectivelyEmpty( queueIdx )
+                && TransactionAvailable( queueIdx ) )
+            {
+                GetEventQueue( )->InsertEvent( EventCycle, this, nextWakeup, NULL, transactionQueuePriority );
+
+                //std::cout << "CY Scheduled transaction queue wakeup at " << nextWakeup << std::endl;
+
+                /* Only allow one request. */
+                scheduled = true;
+                break;
+            }
+
+            if( scheduled ) 
+            {
+                break;
+            }
         }
+    }
+    else
+    {
+        GetChild( )->Cycle( steps );
     }
 }
 
@@ -192,16 +204,21 @@ void MemoryController::Enqueue( ncounter_t queueNum, NVMainRequest *request )
 
     transactionQueues[queueNum].push_back( request );
     
-    /* If this command queue is empty, we can schedule a new transaction right away. */
-    ncounter_t queueId = GetCommandQueueId( request->address );
-
-    if( EffectivelyEmpty( queueId ) )
+    if( p->EventDriven )
     {
-        ncycle_t nextWakeup = GetEventQueue( )->GetCurrentCycle( );
+        /* If this command queue is empty, we can schedule a new transaction right away. */
+        ncounter_t queueId = GetCommandQueueId( request->address );
 
-        if( GetEventQueue( )->FindEvent( EventCycle, this, NULL, nextWakeup ) == NULL )
+        if( EffectivelyEmpty( queueId ) )
         {
-            GetEventQueue( )->InsertEvent( EventCycle, this, nextWakeup, NULL, transactionQueuePriority );
+            ncycle_t nextWakeup = GetEventQueue( )->GetCurrentCycle( );
+
+            if( GetEventQueue( )->FindEvent( EventCycle, this, NULL, nextWakeup ) == NULL )
+            {
+                GetEventQueue( )->InsertEvent( EventCycle, this, nextWakeup, NULL, transactionQueuePriority );
+
+                //std::cout << "Waking up transaction scheduler at " << nextWakeup << std::endl;
+            }
         }
     }
 }
@@ -231,23 +248,30 @@ bool MemoryController::TransactionAvailable( ncounter_t queueId )
 void MemoryController::ScheduleCommandWake( )
 {
     /* Schedule wake event for memory commands if not scheduled. */
-    ncycle_t nextWakeup = NextIssuable( NULL );
-
-    /* Avoid scheduling multiple duplicate events. */
-    bool nextWakeupScheduled = GetEventQueue()->FindCallback( this, 
-                                (CallbackPtr)&MemoryController::CommandQueueCallback,
-                                nextWakeup, NULL, commandQueuePriority );
-
-    if( !nextWakeupScheduled )
+    if( p->EventDriven )
     {
-        GetEventQueue( )->InsertCallback( this, 
-                          (CallbackPtr)&MemoryController::CommandQueueCallback,
-                          nextWakeup, NULL, commandQueuePriority );
+        ncycle_t nextWakeup = NextIssuable( NULL );
+
+        /* Avoid scheduling multiple duplicate events. */
+        bool nextWakeupScheduled = GetEventQueue()->FindCallback( this, 
+                                    (CallbackPtr)&MemoryController::CommandQueueCallback,
+                                    nextWakeup, NULL, commandQueuePriority );
+
+        if( !nextWakeupScheduled )
+        {
+            GetEventQueue( )->InsertCallback( this, 
+                              (CallbackPtr)&MemoryController::CommandQueueCallback,
+                              nextWakeup, NULL, commandQueuePriority );
+        }
+
+        //std::cout << "SCW Scheduled command queue wakeup at " << nextWakeup << std::endl;
     }
 }
 
 void MemoryController::CommandQueueCallback( void * /*data*/ )
 {
+    assert( p->EventDriven == true );
+
     /* Determine time since last wakeup. */
     ncycle_t realSteps = GetEventQueue( )->GetCurrentCycle( ) - lastCommandWake;
     lastCommandWake = GetEventQueue( )->GetCurrentCycle( );
@@ -267,6 +291,8 @@ void MemoryController::CommandQueueCallback( void * /*data*/ )
         GetEventQueue( )->InsertCallback( this, 
                           (CallbackPtr)&MemoryController::CommandQueueCallback,
                           nextWakeup, NULL, commandQueuePriority );
+
+        //std::cout << "CB Scheduled command queue wakeup at " << nextWakeup << std::endl;
     }
 
     CycleCommandQueues( );
@@ -278,15 +304,22 @@ void MemoryController::RefreshCallback( void *data )
 {
     NVMainRequest *request = reinterpret_cast<NVMainRequest *>(data);
 
-    ncycle_t realSteps = GetEventQueue( )->GetCurrentCycle( ) - lastCommandWake;
-    lastCommandWake = GetEventQueue( )->GetCurrentCycle( );
-    wakeupCount++;
+    if( p->EventDriven )
+    {
+        ncycle_t realSteps = GetEventQueue( )->GetCurrentCycle( ) - lastCommandWake;
+        lastCommandWake = GetEventQueue( )->GetCurrentCycle( );
+        wakeupCount++;
 
-    ProcessRefreshPulse( request );
-    HandleRefresh( );
+        ProcessRefreshPulse( request );
+        HandleRefresh( );
 
-    /* Catch up the rest of the system. */
-    GetChild( )->Cycle( realSteps );
+        /* Catch up the rest of the system. */
+        GetChild( )->Cycle( realSteps );
+    }
+    else
+    {
+        ProcessRefreshPulse( request );
+    }
 }
 
 void MemoryController::CleanupCallback( void * /*data*/ )
@@ -408,7 +441,7 @@ void MemoryController::SetConfig( Config *conf, bool createChildren )
      *  number of devices = bus width / device width
      *  Total channel size is: loglcal bank size * BANKS * RANKS
      */
-    std::cout << StatName( ) << " capacity is " << ((p->ROWS * p->COLS * p->tBURST * p->RATE * p->BusWidth * p->BANKS * p->RANKS) / (8*1024*1024)) << " MB." << std::endl;
+    std::cout << StatName( ) << " capacity is " << ((p->ROWS * p->COLS * p->DeviceWidth * p->tBURST * p->RATE * (p->BusWidth / p->DeviceWidth) * p->BANKS * p->RANKS) / (8*1024*1024)) << " MB." << std::endl;
 
     if( conf->KeyExists( "MATHeight" ) )
     {
@@ -448,19 +481,25 @@ void MemoryController::SetConfig( Config *conf, bool createChildren )
     activateQueued = new bool * [p->RANKS];
     refreshQueued = new bool * [p->RANKS];
     starvationCounter = new ncounter_t ** [p->RANKS];
-    effectiveRow = new ncounter_t ** [p->RANKS];
+    effectiveRow = new std::vector<RowBuffer> ** [p->RANKS];
     effectiveMuxedRow = new ncounter_t ** [p->RANKS];
     activeSubArray = new ncounter_t ** [p->RANKS];
     rankPowerDown = new bool [p->RANKS];
+
+    PowerDownCounter = new ncounter_t [p->RANKS];
+    LastAccess = new ncounter_t [p->RANKS];
 
     for( ncounter_t i = 0; i < p->RANKS; i++ )
     {
         activateQueued[i] = new bool[p->BANKS];
         refreshQueued[i] = new bool[p->BANKS];
         activeSubArray[i] = new ncounter_t * [p->BANKS];
-        effectiveRow[i] = new ncounter_t * [p->BANKS];
+        effectiveRow[i] = new std::vector<RowBuffer> * [p->BANKS];
         effectiveMuxedRow[i] = new ncounter_t * [p->BANKS];
         starvationCounter[i] = new ncounter_t * [p->BANKS];
+
+	PowerDownCounter[i] = PowerDownThreshold;
+	LastAccess[i] = GetEventQueue( )->GetCurrentCycle( );
 
         if( p->UseLowPower )
             rankPowerDown[i] = p->InitPD;
@@ -473,7 +512,7 @@ void MemoryController::SetConfig( Config *conf, bool createChildren )
             refreshQueued[i][j] = false;
 
             starvationCounter[i][j] = new ncounter_t [subArrayNum];
-            effectiveRow[i][j] = new ncounter_t [subArrayNum];
+            effectiveRow[i][j] = new std::vector<RowBuffer> [subArrayNum];
             effectiveMuxedRow[i][j] = new ncounter_t [subArrayNum];
             activeSubArray[i][j] = new ncounter_t [subArrayNum];
 
@@ -482,7 +521,7 @@ void MemoryController::SetConfig( Config *conf, bool createChildren )
                 starvationCounter[i][j][m] = 0;
                 activeSubArray[i][j][m] = false;
                 /* set the initial effective row as invalid */
-                effectiveRow[i][j][m] = p->ROWS;
+                effectiveRow[i][j][m].clear();
                 effectiveMuxedRow[i][j][m] = p->ROWS;
             }
         }
@@ -688,7 +727,8 @@ bool MemoryController::HandleRefresh( )
                             for( ncounter_t sa = 0; sa < subArrayNum; sa++ )
                             {
                                 activeSubArray[i][refBank][sa] = false; 
-                                effectiveRow[i][refBank][sa] = p->ROWS;
+                                //effectiveRow[i][refBank][sa] = p->ROWS;
+                                effectiveRow[i][refBank][sa].clear();
                                 effectiveMuxedRow[i][refBank][sa] = p->ROWS;
                             }
                             activateQueued[i][refBank] = false;
@@ -838,7 +878,7 @@ void MemoryController::PowerUp( const ncounter_t& rankId )
     }
 }
 
-void MemoryController::HandleLowPower( )
+void MemoryController::HandleLowPower(ncounter_t rank)
 {
     for( ncounter_t rankId = 0; rankId < p->RANKS; rankId++ )
     {
@@ -876,10 +916,44 @@ void MemoryController::HandleLowPower( )
         /* else, check whether the rank can be powered down or up */
         else
         {
-            if( rankPowerDown[rankId] )
-                PowerUp( rankId );
-            else
-                PowerDown( rankId );
+            //if( rankPowerDown[rankId] )
+            //    PowerUp( rankId );
+            //else
+            //    PowerDown( rankId );
+            if (rankPowerDown[rankId])
+	    {
+		if (rankId != rank)
+		    continue;
+	        else
+		{
+		    PowerUp(rankId); 
+		    LastAccess[rankId] = GetEventQueue( )->GetCurrentCycle( );
+		}
+	    }
+	    else
+	    {
+		if (rankId == rank)
+		{
+		    ncounter_t latency = GetEventQueue( )->GetCurrentCycle( ) - LastAccess[rankId];
+                    if (latency <= 2 * p->tXP )
+                        PowerDownCounter[rankId] = MAX(PowerDownCounter[rankId], 4 * p->tXP);   
+                    else if ((MAX(PowerDownCounter[rankId] / 2 , 4 * p->tXP) <= latency) 
+			    && (latency - MAX(PowerDownCounter[rankId] / 2 , 4 * p->tXP) <= 2 * p->tXP))
+                    {
+                        PowerDownCounter[rankId] = latency + 2 * p->tXP;
+                    }
+                    else
+                        PowerDownCounter[rankId] = MAX(PowerDownCounter[rankId] / 2, 4 * p->tXP);
+		
+		    LastAccess[rankId] = GetEventQueue( )->GetCurrentCycle( );
+		}
+		else
+		{
+		    if (GetEventQueue( )->GetCurrentCycle( ) - LastAccess[rankId] >= PowerDownCounter[rankId])
+			PowerDown(rankId);
+		}
+	    }
+
         }
     }
 }
@@ -1122,16 +1196,28 @@ bool MemoryController::FindStarvedRequest( std::list<NVMainRequest *>& transacti
         (*it)->address.GetTranslatedAddress( &row, &col, &bank, &rank, NULL, &subarray );
         
         /* By design, mux level can only be a subset of the selected columns. */
-        ncounter_t muxLevel = static_cast<ncounter_t>(col / p->RBSize);
+        //ncounter_t muxLevel = static_cast<ncounter_t>(col / p->RBSize);
+
+        // Check if row is in multi-entry rowbuffer
+        bool rowhit = false;
+        for (std::vector<RowBuffer>::iterator it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+        {
+	    if (it->openRow == row)
+	    {
+		rowhit = true;
+		break;
+	    }
+        }
 
         if( activateQueued[rank][bank] 
             && ( !activeSubArray[rank][bank][subarray]          /* The subarray is inactive */
-                || effectiveRow[rank][bank][subarray] != row    /* Row buffer miss */
-                || effectiveMuxedRow[rank][bank][subarray] != muxLevel )  /* Subset of row buffer is not at the sense amps */
+               || !rowhit				        /* Row buffer miss */
+	       // || effectiveRow[rank][bank][subarray] != row    /* Row buffer miss */
+               /* || effectiveMuxedRow[rank][bank][subarray] != muxLevel*/ )  /* Subset of row buffer is not at the sense amps */
             && !bankNeedRefresh[rank][bank]                     /* The bank is not waiting for a refresh */
             && !refreshQueued[rank][bank]                       /* Don't interrupt refreshes queued on bank group head. */
-            && starvationCounter[rank][bank][subarray] 
-                >= starvationThreshold                          /* This subarray has reached starvation threshold */
+            //&& starvationCounter[rank][bank][subarray] 
+            //    >= starvationThreshold                          /* This subarray has reached starvation threshold */
             && (*it)->arrivalCycle != GetEventQueue()->GetCurrentCycle()
             && commandQueues[queueId].empty()                   /* The request queue is empty */
             && pred( (*it) ) )                                  /* User-defined predicate is true */
@@ -1191,6 +1277,10 @@ bool MemoryController::FindCachedAddress( std::list<NVMainRequest *>& transactio
             && (*it)->arrivalCycle != GetEventQueue()->GetCurrentCycle()
             && pred( (*it ) ) )
         {
+            //std::cout << "Found accessible request type " << (*it)->type << " for 0x"
+            //          << std::hex << (*it)->address.GetPhysicalAddress( ) 
+            //          << std::dec << std::endl;
+
             *accessibleRequest = (*it);
             transactionQueue.erase( it );
 
@@ -1243,6 +1333,11 @@ bool MemoryController::FindWriteStalledRead( std::list<NVMainRequest *>& transac
         /* Assume the memory has no subarrays if we don't find the destination. */
         if( writingArray == NULL )
             return false;
+
+        //if( writingArray->IsWriting( ) )
+        //{
+        //    std::cout << "Subarray is writing!" << std::endl;
+        //}
 
         NVMainRequest *testActivate = MakeActivateRequest( (*it) );
         testActivate->flags |= NVMainRequest::FLAG_PRIORITY; 
@@ -1300,6 +1395,7 @@ bool MemoryController::FindRowBufferHit( std::list<NVMainRequest *>& transaction
     return FindRowBufferHit( transactionQueue, hitRequest, pred );
 }
 
+// TODO: Implement multiple entry
 bool MemoryController::FindRowBufferHit( std::list<NVMainRequest *>& transactionQueue, 
                                          NVMainRequest **hitRequest, SchedulingPredicate& pred )
 {
@@ -1318,12 +1414,23 @@ bool MemoryController::FindRowBufferHit( std::list<NVMainRequest *>& transaction
         (*it)->address.GetTranslatedAddress( &row, &col, &bank, &rank, NULL, &subarray );
 
         /* By design, mux level can only be a subset of the selected columns. */
-        ncounter_t muxLevel = static_cast<ncounter_t>(col / p->RBSize);
+        //ncounter_t muxLevel = static_cast<ncounter_t>(col / p->RBSize);
+
+	bool rowhit = false;
+	for (std::vector<RowBuffer>::iterator it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+        {
+            if (it->openRow == row)
+            {
+                rowhit = true;
+                break;
+            }
+        }
 
         if( activateQueued[rank][bank]                    /* The bank is active */ 
             && activeSubArray[rank][bank][subarray]       /* The subarray is open */
-            && effectiveRow[rank][bank][subarray] == row  /* The effective row is the row of this request */ 
-            && effectiveMuxedRow[rank][bank][subarray] == muxLevel  /* Subset of row buffer is currently at the sense amps */
+            && rowhit
+	    //&& effectiveRow[rank][bank][subarray] == row  /* The effective row is the row of this request */ 
+            //&& effectiveMuxedRow[rank][bank][subarray] == muxLevel  /* Subset of row buffer is currently at the sense amps */
             && !bankNeedRefresh[rank][bank]               /* The bank is not waiting for a refresh */
             && !refreshQueued[rank][bank]                 /* Don't interrupt refreshes queued on bank group head. */
             && (*it)->arrivalCycle != GetEventQueue()->GetCurrentCycle()
@@ -1493,13 +1600,24 @@ bool MemoryController::IssueMemoryCommands( NVMainRequest *req )
     FailReason reason;
     NVMainRequest *cachedRequest = MakeCachedRequest( req );
 
+    bool rowhit = false;
+    for (std::vector<RowBuffer>::iterator it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+    {
+        if (it->openRow == row)
+        {
+            rowhit = true;
+            break;
+        }
+    }
+
     if( GetChild( )->IsIssuable( cachedRequest, &reason ) )
     {
         /* Differentiate from row-buffer hits. */
         if ( !activateQueued[rank][bank] 
              || !activeSubArray[rank][bank][subarray]
-             || effectiveRow[rank][bank][subarray] != row 
-             || effectiveMuxedRow[rank][bank][subarray] != muxLevel ) 
+             || !rowhit
+	     //|| effectiveRow[rank][bank][subarray] != row 
+             /*|| effectiveMuxedRow[rank][bank][subarray] != muxLevel*/ ) 
         {
             req->issueCycle = GetEventQueue()->GetCurrentCycle();
 
@@ -1522,10 +1640,14 @@ bool MemoryController::IssueMemoryCommands( NVMainRequest *req )
 
     if( !activateQueued[rank][bank] && commandQueues[queueId].empty() )
     {
+	RowBuffer tmp;
+	tmp.openRow = row;
+	tmp.age = 0;
         /* Any activate will request the starvation counter */
         activateQueued[rank][bank] = true;
         activeSubArray[rank][bank][subarray] = true;
-        effectiveRow[rank][bank][subarray] = row;
+        effectiveRow[rank][bank][subarray].clear();
+	effectiveRow[rank][bank][subarray].push_back(tmp);
         effectiveMuxedRow[rank][bank][subarray] = muxLevel;
         starvationCounter[rank][bank][subarray] = 0;
 
@@ -1542,11 +1664,13 @@ bool MemoryController::IssueMemoryCommands( NVMainRequest *req )
          * buffer hit
          * or 2) ClosePage == 2, the request is always the last request
          */
+	// TODO: Check if we need to delete this
         if( req->flags & NVMainRequest::FLAG_LAST_REQUEST && p->UsePrecharge )
         {
             commandQueues[queueId].push_back( MakeImplicitPrechargeRequest( req ) );
             activeSubArray[rank][bank][subarray] = false;
-            effectiveRow[rank][bank][subarray] = p->ROWS;
+            effectiveRow[rank][bank][subarray].clear();
+	    //effectiveRow[rank][bank][subarray] = p->ROWS;
             effectiveMuxedRow[rank][bank][subarray] = p->ROWS;
             activateQueued[rank][bank] = false;
         }
@@ -1559,8 +1683,9 @@ bool MemoryController::IssueMemoryCommands( NVMainRequest *req )
     }
     else if( activateQueued[rank][bank] 
             && ( !activeSubArray[rank][bank][subarray] 
-                || effectiveRow[rank][bank][subarray] != row 
-                || effectiveMuxedRow[rank][bank][subarray] != muxLevel )
+                || !rowhit
+		//|| effectiveRow[rank][bank][subarray] != row 
+                /*|| effectiveMuxedRow[rank][bank][subarray] != muxLevel*/ )
             && commandQueues[queueId].empty() )
     {
         /* Any activate will request the starvation counter */
@@ -1571,28 +1696,73 @@ bool MemoryController::IssueMemoryCommands( NVMainRequest *req )
 
         if( activeSubArray[rank][bank][subarray] && p->UsePrecharge )
         {
-            commandQueues[queueId].push_back( 
-                    MakePrechargeRequest( effectiveRow[rank][bank][subarray], 0, bank, rank, subarray ) );
+	    // Check if the row buffer is full
+	    // If so, we need to precharge the oldest row
+	    if (effectiveRow[rank][bank][subarray].size() == RowBufferEntry)
+            {
+                if (algorithm == FIFO)
+                {
+		    commandQueues[queueId].push_back(
+			MakePrechargeRequest( effectiveRow[rank][bank][subarray].begin()->openRow, 0, bank, rank, subarray ) );
+                    effectiveRow[rank][bank][subarray].erase(effectiveRow[rank][bank][subarray].begin());
+                }
+                else if (algorithm == LRU)
+                {
+                    RowBuffer *oldest = &(*effectiveRow[rank][bank][subarray].begin());
+                    int ind = 0;
+                    int old = 0;
+                    for (auto it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+                    {
+			it->age++;
+                        if (it->age > oldest->age)
+                        {
+                            oldest = &(*it);
+                            old = ind;
+                        }
+                        ind++;
+                    }
+		    commandQueues[queueId].push_back(
+                    	MakePrechargeRequest( oldest->openRow, 0, bank, rank, subarray ) );
+                    effectiveRow[rank][bank][subarray].erase(effectiveRow[rank][bank][subarray].begin()+old);
+                }
+                //else
+                    //panic("Unknown row buffer replacement algorithm!");
+            }
         }
+
+	RowBuffer tmp;
+        tmp.openRow = row;
+        tmp.age = 0;
 
         NVMainRequest *actRequest = MakeActivateRequest( req );
         actRequest->flags |= (writingArray != NULL && writingArray->IsWriting( )) ? NVMainRequest::FLAG_PRIORITY : 0;
         commandQueues[queueId].push_back( actRequest );
         commandQueues[queueId].push_back( req );
         activeSubArray[rank][bank][subarray] = true;
-        effectiveRow[rank][bank][subarray] = row;
+        effectiveRow[rank][bank][subarray].push_back(tmp);
         effectiveMuxedRow[rank][bank][subarray] = muxLevel;
 
         rv = true;
     }
     else if( activateQueued[rank][bank] 
             && activeSubArray[rank][bank][subarray]
-            && effectiveRow[rank][bank][subarray] == row 
-            && effectiveMuxedRow[rank][bank][subarray] == muxLevel )
+	    && rowhit
+            //&& effectiveRow[rank][bank][subarray] == row 
+            /*&& effectiveMuxedRow[rank][bank][subarray] == muxLevel*/ )
     {
         starvationCounter[rank][bank][subarray]++;
 
         req->issueCycle = GetEventQueue()->GetCurrentCycle();
+
+	if (algorithm == LRU)
+	{
+	    for (std::vector<RowBuffer>::iterator it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+    	    {
+	        it->age++;
+                if (it->openRow == row)
+                    it->age = 0;
+            }
+	}
 
         /* Different row buffer management policy has different behavior */ 
         /*
@@ -1601,6 +1771,7 @@ bool MemoryController::IssueMemoryCommands( NVMainRequest *req )
          * buffer hit
          * or 2) ClosePage == 2, the request is always the last request
          */
+	// TODO: Check if delete this
         if( req->flags & NVMainRequest::FLAG_LAST_REQUEST && p->UsePrecharge )
         {
             /* if Restricted Close-Page is applied, we should never be here */
@@ -1608,7 +1779,8 @@ bool MemoryController::IssueMemoryCommands( NVMainRequest *req )
 
             commandQueues[queueId].push_back( MakeImplicitPrechargeRequest( req ) );
             activeSubArray[rank][bank][subarray] = false;
-            effectiveRow[rank][bank][subarray] = p->ROWS;
+            effectiveRow[rank][bank][subarray].clear();
+	    //effectiveRow[rank][bank][subarray] = p->ROWS;
             effectiveMuxedRow[rank][bank][subarray] = p->ROWS;
 
             bool idle = true;
@@ -1647,10 +1819,24 @@ bool MemoryController::IssueMemoryCommands( NVMainRequest *req )
 
 void MemoryController::CycleCommandQueues( )
 {
-    //HandleLowPower( );
+    /*if( p->UseLowPower && !p->EventDriven )
+    {
+        HandleLowPower( );
+    }*/
 
-    /* If a refresh event schedule for this cycle was handled, we are done. */
-    if( handledRefresh == GetEventQueue()->GetCurrentCycle() )
+    /* First of all, see whether we can issue a necessary refresh */
+    if( p->UseRefresh && !p->EventDriven ) 
+    {
+        if( HandleRefresh( ) )
+            return;
+    }
+
+    /* 
+     * Just to make event-driven act like execution-driven, but removing
+     * this should be functionally correct.
+     */
+    if( p->EventDriven
+        && handledRefresh == GetEventQueue()->GetCurrentCycle() )
     {
         return;
     }
@@ -1675,6 +1861,14 @@ void MemoryController::CycleCommandQueues( )
                          << queueHead->address.GetPhysicalAddress()
                          << std::dec << " for queue " << queueId << std::endl;
 
+	    ncounter_t row, col, bank, rank, channel, subarray;
+            queueHead->address.GetTranslatedAddress( &row, &col, &bank, &rank, &channel, &subarray );
+	    if( p->UseLowPower && !p->EventDriven )
+	    {   
+        	HandleLowPower(rank);
+        	//std::cout << "Execute HandleLowPower"<< std::endl;
+    	    }
+
             GetChild( )->IssueCommand( queueHead );
 
             queueHead->flags |= NVMainRequest::FLAG_ISSUED;
@@ -1698,7 +1892,7 @@ void MemoryController::CycleCommandQueues( )
                                   cleanupCycle, NULL, cleanupPriority );
 
             /* If the bank queue will be empty, we can issue another transaction, so wakeup the system. */
-            if( commandQueues[queueId].size( ) == 1 )
+            if( p->EventDriven && commandQueues[queueId].size( ) == 1 )
             {
                 /* If there is a transaction for this command queue, wake immediately. */
                 if( TransactionAvailable( queueId ) )
@@ -1706,6 +1900,8 @@ void MemoryController::CycleCommandQueues( )
                     ncycle_t nextWakeup = GetEventQueue( )->GetCurrentCycle( ) + 1;
 
                     GetEventQueue( )->InsertEvent( EventCycle, this, nextWakeup, NULL, transactionQueuePriority );
+
+                    //std::cout << "Scheduled transaction queue wakeup at " << nextWakeup << std::endl;
                 }
             }
 
@@ -1717,9 +1913,10 @@ void MemoryController::CycleCommandQueues( )
         else if( !commandQueues[queueId].empty( ) )
         {
             NVMainRequest *queueHead = commandQueues[queueId].at( 0 );
-
+	
             if( ( GetEventQueue()->GetCurrentCycle() - queueHead->issueCycle ) > p->DeadlockTimer )
             {
+		std::cout<<"reason is: "<<static_cast<std::underlying_type<FailReasons>::type>(fail.reason)<<std::endl;
                 ncounter_t row, col, bank, rank, channel, subarray;
                 queueHead->address.GetTranslatedAddress( &row, &col, &bank, &rank, &channel, &subarray );
                 std::cout << "NVMain Warning: Operation could not be sent to memory after a very long time: "
@@ -1812,6 +2009,10 @@ ncycle_t MemoryController::NextIssuable( NVMainRequest * /*request*/ )
 
             NVMainRequest *queueHead = commandQueues[queueIdx].at( 0 );
 
+            //std::cout << "0x" << std::hex << queueHead->address.GetPhysicalAddress( )
+            //          << " issuable at " << std::dec 
+            //          << GetChild( )->NextIssuable( queueHead ) << std::endl;
+
             nextWakeup = MIN( nextWakeup, GetChild( )->NextIssuable( queueHead ) );
         }
     }
@@ -1875,8 +2076,11 @@ void MemoryController::MoveCurrentQueue( )
 void MemoryController::CalculateStats( )
 {
     /* Sync all the child modules to the same cycle before calculating stats. */
-    ncycle_t syncCycles = GetEventQueue( )->GetCurrentCycle( ) - lastCommandWake;
-    GetChild( )->Cycle( syncCycles );
+    if( p->EventDriven )
+    {
+        ncycle_t syncCycles = GetEventQueue( )->GetCurrentCycle( ) - lastCommandWake;
+        GetChild( )->Cycle( syncCycles );
+    }
 
     simulation_cycles = GetEventQueue()->GetCurrentCycle();
 

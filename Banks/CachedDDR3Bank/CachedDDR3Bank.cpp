@@ -227,7 +227,11 @@ bool CachedDDR3Bank::Activate( NVMainRequest *request )
     if( success )
     {
         /* bank-level update */
-        openRow = activateRow;
+	RowBuffer tmp;
+	tmp.openRow = activateRow;
+	tmp.age = 0;
+	openRow.push_back(tmp);
+        //openRow = activateRow;
         state = DDR3BANK_OPEN;
         activeSubArrayQueue.push_front( activateSubArray );
         activates++;

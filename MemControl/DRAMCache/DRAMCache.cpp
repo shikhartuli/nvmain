@@ -100,7 +100,7 @@ void DRAMCache::SetConfig( Config *conf, bool createChildren )
         for( ncounter_t i = 0; i < numChannels; i++ )
         {
             /* Setup the translation method for DRAM cache decoders. */
-            int channels, ranks, banks, rows, cols, subarrays, ignoreBits;
+            int channels, ranks, banks, rows, cols, subarrays;
             
             if( conf->KeyExists( "MATHeight" ) )
             {
@@ -127,20 +127,12 @@ void DRAMCache::SetConfig( Config *conf, bool createChildren )
                                      NVM::mlog2( subarrays )
                                      );
             drcMethod->SetCount( rows, cols, banks, ranks, channels, subarrays );
-            drcMethod->SetAddressMappingScheme(conf->GetString("AddressMappingScheme"));
             
             /* When selecting a child, use the channel field from a DRC decoder. */
             DRCDecoder *drcDecoder = new DRCDecoder( );
             drcDecoder->SetConfig( config, createChildren );
             drcDecoder->SetTranslationMethod( drcMethod );
             drcDecoder->SetDefaultField( CHANNEL_FIELD );
-            /* Set ignore bits for DRC decoder*/
-            if( conf->KeyExists( "IgnoreBits" ) )
-            {
-                ignoreBits = conf->GetValue( "IgnoreBits" );
-                drcDecoder->SetIgnoreBits(ignoreBits);
-            }
-
             SetDecoder( drcDecoder );
 
             /* Initialize a DRAM cache channel. */
@@ -223,7 +215,6 @@ bool DRAMCache::IssueFunctional( NVMainRequest *req )
 {
     uint64_t chan;
 
-    Retranslate( req );
     req->address.GetTranslatedAddress( NULL, NULL, NULL, NULL, &chan, NULL );
 
     assert( chan < numChannels );

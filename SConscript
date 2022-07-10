@@ -33,7 +33,6 @@ import os, sys
 import subprocess
 
 from os.path import basename
-from gem5_scons import Transform
 
 
 HG_COMMAND = 'hg'
@@ -53,6 +52,43 @@ if 'TARGET_ISA' in env and not 'NVMAIN_BUILD' in env:
     def NVMainSource(src):
         return Source(src)
     Export('NVMainSource')
+
+    # Attempt to check the revision number of gem5
+    print("Checking gem5 revision number...")
+
+    # Assume some non-ancient version of gem5
+    gem5_rv = 11654
+    try:
+        # Use 'hg log' to get qparent revision number information
+        proc = subprocess.Popen([HG_COMMAND, 'log', '--template', '{rev}\n', '-r', 'qparent'], 
+                                stdout=subprocess.PIPE, stderr = open(os.devnull, 'w'))
+        proc.wait()
+
+        # If the return code is not successful, assume no patches are applied
+        if proc.returncode == 0:
+            gem5_rv = int(proc.communicate()[0].rstrip())
+            print(gem5_rv)
+        elif proc.returncode == 255:
+            # If a failure returned, we may not have any patches applied:
+            # Try to get the revision number another way
+            proc = subprocess.Popen([HG_COMMAND, 'identify', '--num'], 
+                                    stdout=subprocess.PIPE, stderr = open(os.devnull, 'w'))
+            proc.wait()
+
+            if proc.returncode == 0:
+                gem5_rv = int(proc.communicate()[0].rstrip())
+                print(gem5_rv)
+            else:
+                print("Unknown. Assuming recent revision.")
+        else:
+            print("Unknown. Assuming recent revision.")
+    except:
+        gem5_rv = 11654
+        pass
+
+    gem5_rv_define = '-DNVM_GEM5_RV=' + str(gem5_rv)
+    env.Append(CCFLAGS=gem5_rv_define)
+    env['NVM_GEM5_RV'] = gem5_rv
 
 # Common source files for any build
 NVMainSource('NVM/nvmain.cpp')
@@ -91,6 +127,6 @@ elif "NVMAINPATH" in os.environ:
     # Nothing to be done here for now.
     pass
 else:
-    print "ERROR: What kind of build is this?"
+    print("ERROR: What kind of build is this?")
     sys.exit(1)
 

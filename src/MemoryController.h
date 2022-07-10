@@ -60,7 +60,7 @@ enum QueueModel { PerRankQueues, PerBankQueues, PerSubArrayQueues };
  *  same clock cycle. 
  *
  *  By default, the transaction queue has *lower* priority to more closely
- *  model an execution driven order.
+ *  model the execution driven order.
  */
 const int transactionQueuePriority = 30;
 const int commandQueuePriority = 40;
@@ -96,6 +96,24 @@ class ComplementPredicate : public SchedulingPredicate
     }
 };
 
+class RowBuffer
+    {
+    public:
+        ncounter_t openRow;
+        uint32_t age;
+	bool isread;
+        NVMainRequest *WriteRequest;
+
+        RowBuffer() :
+            openRow(0), age(0), isread(true), WriteRequest(NULL)
+        {}
+    };
+
+// Row buffer replacement algorithm
+enum Replacement {
+    FIFO,
+    LRU
+};
 
 class MemoryController : public NVMObject 
 {
@@ -144,7 +162,14 @@ class MemoryController : public NVMObject
 
     bool **activateQueued;
     bool **refreshQueued;
-    ncounter_t ***effectiveRow;
+    
+
+    static const ncycle_t PowerDownThreshold = 100;
+    ncycle_t *PowerDownCounter;
+    ncycle_t *LastAccess;
+    static const Replacement algorithm = LRU; // FIFO, LRU
+    static const uint8_t RowBufferEntry = 8; // 2,4,8,16,32...
+    std::vector<RowBuffer> ***effectiveRow;
     ncounter_t ***effectiveMuxedRow;
     ncounter_t ***activeSubArray;
     ncounter_t ***starvationCounter;
@@ -252,7 +277,7 @@ class MemoryController : public NVMObject
 
     void PowerDown( const ncounter_t& );
     void PowerUp( const ncounter_t& );
-    virtual void HandleLowPower( );
+    virtual void HandleLowPower(ncounter_t rank);
 
     /* Check if a command queue is empty or will be cleaned up. */
     bool EffectivelyEmpty( const ncounter_t& );
@@ -267,6 +292,8 @@ class MemoryController : public NVMObject
 
     /* Stats */
     ncounter_t simulation_cycles;
+
+    friend class SubArray;
 };
 
 };

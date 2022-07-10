@@ -317,12 +317,14 @@ bool StandardRank::Read( NVMainRequest *request )
     /* Even though the command may be READ_PRECHARGE, it still works */
     nextRead = MAX( nextRead, 
                     GetEventQueue()->GetCurrentCycle() 
-                    + MAX( p->tBURST, p->tCCD ) * request->burstCount );
+		    + p->tCCD );
+                    //+ MAX( p->tBURST, p->tCCD ) * request->burstCount );
 
-    nextWrite = MAX( nextWrite, 
-                     GetEventQueue()->GetCurrentCycle() 
-                     + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                     + p->tCAS + p->tBURST + p->tRTRS - p->tCWD ); 
+    // read and write are decoupled
+    //nextWrite = MAX( nextWrite, 
+    //                 GetEventQueue()->GetCurrentCycle() 
+    //                 + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+    //                 + p->tCAS + p->tBURST + p->tRTRS - p->tCWD ); 
 
     /* if it has implicit precharge, insert the precharge to close the rank */ 
     if( request->type == READ_PRECHARGE )
@@ -332,8 +334,8 @@ bool StandardRank::Read( NVMainRequest *request )
         dupPRE->owner = this;
 
         GetEventQueue( )->InsertEvent( EventResponse, this, dupPRE, 
-            MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-            + GetEventQueue( )->GetCurrentCycle( ) + p->tAL + p->tRTP );
+            //MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+           /* + */ GetEventQueue( )->GetCurrentCycle( ) + p->tAL + p->tRTP );
     }
 
     if( success == false )
@@ -370,14 +372,16 @@ bool StandardRank::Write( NVMainRequest *request )
     bool success = GetChild( request )->IssueCommand( request );
 
     /* Even though the command may be WRITE_PRECHARGE, it still works */
-    nextRead = MAX( nextRead, 
-                    GetEventQueue()->GetCurrentCycle() 
-                    + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                    + p->tCWD + p->tBURST + p->tWTR );
+    // read and write are decoupled
+    //nextRead = MAX( nextRead, 
+    //                GetEventQueue()->GetCurrentCycle() 
+    //                + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+    //                + p->tCWD + p->tBURST + p->tWTR );
 
     nextWrite = MAX( nextWrite, 
                      GetEventQueue()->GetCurrentCycle() 
-                     + MAX( p->tBURST, p->tCCD ) * request->burstCount );
+		     +  p->tCCD  );
+                     //+ MAX( p->tBURST, p->tCCD ) * request->burstCount );
 
     /* if it has implicit precharge, insert the precharge to close the rank */ 
     if( request->type == WRITE_PRECHARGE )
@@ -388,8 +392,9 @@ bool StandardRank::Write( NVMainRequest *request )
 
         GetEventQueue( )->InsertEvent( EventResponse, this, dupPRE, 
                         GetEventQueue( )->GetCurrentCycle( ) 
-                        + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                        + p->tAL + p->tCWD + p->tBURST + p->tWR );
+			+ p->tAL + p->tCWD + p->tWR );
+                        //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+                        //+ p->tAL + p->tCWD + p->tBURST + p->tWR );
     }
 
     if( success == false )
@@ -526,7 +531,7 @@ bool StandardRank::PowerUp( NVMainRequest *request )
 
     /* 
      * PowerUp() should be completed to all banks, partial PowerUp is
-     * incorrect. Therefore, call CanPowerUp() first before every PowerDown
+     * incorrect. Therefore, call CanPowerUp() first before every PowerUp
      */
     for( ncounter_t childIdx = 0; childIdx < GetChildren().size(); childIdx++ )
     {
@@ -835,18 +840,19 @@ void StandardRank::Notify( NVMainRequest *request )
     if( op == READ || op == READ_PRECHARGE )
     {
         nextRead = MAX( nextRead, GetEventQueue()->GetCurrentCycle() 
-                                    + p->tBURST + p->tRTRS );
+                                    /*+ p->tBURST*/ + p->tRTRS );
 
-        nextWrite = MAX( nextWrite, GetEventQueue()->GetCurrentCycle() 
-                                    + p->tCAS + p->tBURST + p->tRTRS - p->tCWD);
+	// read and write are decoupled
+        //nextWrite = MAX( nextWrite, GetEventQueue()->GetCurrentCycle() 
+        //                            + p->tCAS + p->tBURST + p->tRTRS - p->tCWD);
     }
     else if( op == WRITE || op == WRITE_PRECHARGE )
     {
         nextWrite = MAX( nextWrite, GetEventQueue()->GetCurrentCycle() 
-                                    + p->tBURST + p->tOST );
+                                    /*+ p->tBURST*/ + p->tOST );
 
-        nextRead = MAX( nextRead, GetEventQueue()->GetCurrentCycle()
-                                    + p->tBURST + p->tCWD + p->tRTRS - p->tCAS );
+        //nextRead = MAX( nextRead, GetEventQueue()->GetCurrentCycle()
+        //                            + p->tBURST + p->tCWD + p->tRTRS - p->tCAS );
     }
 }
 
@@ -1017,8 +1023,8 @@ void StandardRank::CalculateStats( )
         refreshPower *= (double)deviceCount;
     }
 
-    totalEnergy += activateEnergy + burstEnergy + refreshEnergy + backgroundEnergy;
-    totalPower += activatePower + burstPower + refreshPower + backgroundPower;
+    totalEnergy = activateEnergy + burstEnergy + refreshEnergy + backgroundEnergy;
+    totalPower = activatePower + burstPower + refreshPower + backgroundPower;
 
     actWaitAverage = static_cast<double>(actWaitTotal) / static_cast<double>(actWaits);
     rrdWaitAverage = static_cast<double>(rrdWaitTotal) / static_cast<double>(rrdWaits);

@@ -143,7 +143,7 @@ void LH_Cache::SetConfig( Config *conf, bool createChildren )
         {
             bankLocked[i][j] = false;
             functionalCache[i][j] = new CacheBank( 
-                                         conf->GetValue( "ROWS" ), 1, 29, 64 );
+                                         conf->GetValue( "ROWS" ), 29, 64 );
         }
     }
 
@@ -566,12 +566,27 @@ bool LH_Cache::IssueDRCCommands( NVMainRequest *req )
 
     req->address.GetTranslatedAddress( &row, NULL, &bank, &rank, NULL, &subarray );
 
+    bool rowhit = false;
+    for (std::vector<RowBuffer>::iterator it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+    {
+        if (it->openRow == row)
+        {
+            rowhit = true;
+            break;
+        }
+    }
+
     if( !activateQueued[rank][bank] && commandQueues[queueId].empty() )
     {
+	RowBuffer tmp;
+	tmp.openRow = row;
+	tmp.age = 0;
         /* Any activate will request the starvation counter */
         starvationCounter[rank][bank] = 0;
         activateQueued[rank][bank] = true;
-        effectiveRow[rank][bank][subarray] = row;
+        //effectiveRow[rank][bank][subarray] = row;
+        effectiveRow[rank][bank][subarray].clear();
+	effectiveRow[rank][bank][subarray].push_back(tmp);
 
         req->issueCycle = GetEventQueue()->GetCurrentCycle();
 
@@ -583,12 +598,41 @@ bool LH_Cache::IssueDRCCommands( NVMainRequest *req )
 
         rv = true;
     }
-    else if( activateQueued[rank][bank] && effectiveRow[rank][bank][subarray] != row && commandQueues[queueId].empty() )
+    else if( activateQueued[rank][bank] && /*effectiveRow[rank][bank][subarray] != row*/ !rowhit && commandQueues[queueId].empty() )
     {
+	if (effectiveRow[rank][bank][subarray].size() >= RowBufferEntry)
+	{
+	    if (algorithm == FIFO)
+		effectiveRow[rank][bank][subarray].erase(effectiveRow[rank][bank][subarray].begin());
+	    else if (algorithm == LRU)
+	    {
+		RowBuffer *oldest = &(*effectiveRow[rank][bank][subarray].begin());
+                int ind = 0;
+                int old = 0;
+		for (auto it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+                {
+                    it->age++;
+                    if (it->age > oldest->age)
+                    {
+                        oldest = &(*it);
+                        old = ind;
+                    }
+                    ind++;
+                }
+		effectiveRow[rank][bank][subarray].erase(effectiveRow[rank][bank][subarray].begin()+old);
+	    }
+	    //else
+		//panic("Unknown row buffer replacement algorithm!");
+	}
+
+	RowBuffer tmp;
+	tmp.openRow = row;
+	tmp.age = 0;
         /* Any activate will request the starvation counter */
         starvationCounter[rank][bank] = 0;
         activateQueued[rank][bank] = true;
-        effectiveRow[rank][bank][subarray] = row;
+        //effectiveRow[rank][bank][subarray] = row;
+        effectiveRow[rank][bank][subarray].push_back(tmp);
 
         req->issueCycle = GetEventQueue()->GetCurrentCycle();
 
@@ -601,8 +645,18 @@ bool LH_Cache::IssueDRCCommands( NVMainRequest *req )
 
         rv = true;
     }
-    else if( activateQueued[rank][bank] && effectiveRow[rank][bank][subarray] == row )
+    else if( activateQueued[rank][bank] && /*effectiveRow[rank][bank][subarray] == row*/ rowhit )
     {
+	if (algorithm == LRU)
+        {
+            for (std::vector<RowBuffer>::iterator it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+            {
+                it->age++;
+                if (it->openRow == row)
+                    it->age = 0;
+            }
+        }
+
         starvationCounter[rank][bank]++;
 
         req->issueCycle = GetEventQueue()->GetCurrentCycle();
@@ -630,12 +684,26 @@ bool LH_Cache::IssueFillCommands( NVMainRequest *req )
 
     req->address.GetTranslatedAddress( &row, NULL, &bank, &rank, NULL, &subarray );
 
+    bool rowhit = false;
+    for (std::vector<RowBuffer>::iterator it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+    {
+        if (it->openRow == row)
+        {
+            rowhit = true;
+            break;
+        }
+    }
+
     if( !activateQueued[rank][bank] && commandQueues[queueId].empty() )
     {
+	RowBuffer tmp;
+	tmp.openRow = row;
+	tmp.age = 0;
         /* Any activate will request the starvation counter */
         starvationCounter[rank][bank] = 0;
         activateQueued[rank][bank] = true;
-        effectiveRow[rank][bank][subarray] = row;
+        //effectiveRow[rank][bank][subarray] = row;
+        effectiveRow[rank][bank][subarray].push_back(tmp);
 
         req->issueCycle = GetEventQueue()->GetCurrentCycle();
 
@@ -645,13 +713,42 @@ bool LH_Cache::IssueFillCommands( NVMainRequest *req )
 
         rv = true;
     }
-    else if( activateQueued[rank][bank] && effectiveRow[rank][bank][subarray] != row 
+    else if( activateQueued[rank][bank] && !rowhit //effectiveRow[rank][bank][subarray] != row 
             && commandQueues[queueId].empty() )
     {
+	if (effectiveRow[rank][bank][subarray].size() >= RowBufferEntry)
+        {
+            if (algorithm == FIFO)
+                effectiveRow[rank][bank][subarray].erase(effectiveRow[rank][bank][subarray].begin());
+            else if (algorithm == LRU)
+            {
+                RowBuffer *oldest = &(*effectiveRow[rank][bank][subarray].begin());
+                int ind = 0;
+                int old = 0;
+                for (auto it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+                {
+                    it->age++;
+                    if (it->age > oldest->age)
+                    {
+                        oldest = &(*it);
+                        old = ind;
+                    }
+                    ind++;
+                }
+                effectiveRow[rank][bank][subarray].erase(effectiveRow[rank][bank][subarray].begin()+old);
+            }
+            //else
+                //panic("Unknown row buffer replacement algorithm!");
+        }
+
+	RowBuffer tmp;
+	tmp.openRow = row;
+	tmp.age = 0;
         /* Any activate will request the starvation counter */
         starvationCounter[rank][bank] = 0;
         activateQueued[rank][bank] = true;
-        effectiveRow[rank][bank][subarray] = row;
+        //effectiveRow[rank][bank][subarray] = row;
+        effectiveRow[rank][bank][subarray].push_back(tmp);
 
         req->issueCycle = GetEventQueue()->GetCurrentCycle();
 
@@ -662,8 +759,18 @@ bool LH_Cache::IssueFillCommands( NVMainRequest *req )
 
         rv = true;
     }
-    else if( activateQueued[rank][bank] && effectiveRow[rank][bank][subarray] == row )
+    else if( activateQueued[rank][bank] && rowhit /*effectiveRow[rank][bank][subarray] == row*/ )
     {
+	if (algorithm == LRU)
+        {
+            for (std::vector<RowBuffer>::iterator it = effectiveRow[rank][bank][subarray].begin(); it != effectiveRow[rank][bank][subarray].end(); it++)
+            {
+                it->age++;
+                if (it->openRow == row)
+                    it->age = 0;
+            }
+        }
+
         starvationCounter[rank][bank]++;
 
         req->issueCycle = GetEventQueue()->GetCurrentCycle();

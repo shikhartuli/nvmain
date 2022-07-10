@@ -84,6 +84,7 @@ int TraceMain::RunTrace( int argc, char *argv[] )
     GlobalEventQueue *globalEventQueue = new GlobalEventQueue( );
     TagGenerator *tagGenerator = new TagGenerator( 1000 );
     bool IgnoreData = false;
+    bool EventDriven = false;
 
     uint64_t simulateCycles;
     uint64_t currentCycle;
@@ -138,6 +139,8 @@ int TraceMain::RunTrace( int argc, char *argv[] )
     {
         IgnoreData = true;
     }
+
+    config->GetBool( "EventDriven", EventDriven );
 
     /*  Add any specified hooks */
     std::vector<std::string>& hookList = config->GetHooks( );
@@ -211,7 +214,10 @@ int TraceMain::RunTrace( int argc, char *argv[] )
             /* Wait for requests to drain. */
             while( outstandingRequests > 0 )
             {
-                globalEventQueue->Cycle( 1 );
+                if( EventDriven )
+                    globalEventQueue->Cycle( 1 );
+                else 
+                    GetChild( )->Cycle( 1 );
               
                 currentCycle++;
 
@@ -253,8 +259,21 @@ int TraceMain::RunTrace( int argc, char *argv[] )
          */
         if( tl->GetCycle( ) > simulateCycles && simulateCycles != 0 )
         {
-            globalEventQueue->Cycle( simulateCycles - currentCycle );
-            currentCycle += simulateCycles - currentCycle;
+            if( EventDriven )
+            {
+                globalEventQueue->Cycle( simulateCycles - currentCycle );
+                currentCycle += simulateCycles - currentCycle;
+
+                break;
+            }
+
+            /* Just ride it out 'til the end. */
+            while( currentCycle < simulateCycles )
+            {
+                GetChild( )->Cycle( 1 );
+              
+                currentCycle++;
+            }
 
             break;
         }
@@ -268,8 +287,24 @@ int TraceMain::RunTrace( int argc, char *argv[] )
              */
             if( tl->GetCycle( ) > currentCycle )
             {
-                globalEventQueue->Cycle( tl->GetCycle() - currentCycle );
-                currentCycle = globalEventQueue->GetCurrentCycle( );
+                if( EventDriven )
+                {
+                    globalEventQueue->Cycle( tl->GetCycle() - currentCycle );
+                    currentCycle = globalEventQueue->GetCurrentCycle( );
+                }
+                else
+                {
+                    /* Wait until currentCycle is the trace operation's cycle. */
+                    while( currentCycle < tl->GetCycle( ) )
+                    {
+                        if( currentCycle >= simulateCycles && simulateCycles != 0 )
+                            break;
+
+                        GetChild( )->Cycle( 1 );
+
+                        currentCycle++;
+                    }
+                }
 
                 if( currentCycle >= simulateCycles && simulateCycles != 0 )
                     break;
@@ -284,8 +319,16 @@ int TraceMain::RunTrace( int argc, char *argv[] )
                 if( currentCycle >= simulateCycles && simulateCycles != 0 )
                     break;
 
-                globalEventQueue->Cycle( 1 );
-                currentCycle = globalEventQueue->GetCurrentCycle( );
+                if( EventDriven )
+                {
+                    globalEventQueue->Cycle( 1 );
+                    currentCycle = globalEventQueue->GetCurrentCycle( );
+                }
+                else 
+                {
+                    GetChild( )->Cycle( 1 );
+                    currentCycle++;
+                }
             }
 
             outstandingRequests++;

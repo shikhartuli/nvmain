@@ -35,6 +35,7 @@
 
 /* Add your hook's include files here.*/
 #include "Utils/Visualizer/Visualizer.h"
+#include "Utils/RequestTracer/RequestTracer.h"
 #include "Utils/PostTrace/PostTrace.h"
 #include "Utils/CoinMigrator/CoinMigrator.h"
 
@@ -47,6 +48,7 @@ NVMObject *HookFactory::CreateHook( std::string hookName )
     NVMObject *hook = NULL;
 
     if( hookName == "Visualizer" ) hook = new Visualizer( );
+    else if( hookName == "RequestTracer" ) hook = new RequestTracer( );
     else if( hookName == "PostTrace" ) hook = new PostTrace( );
     else if( hookName == "CoinMigrator" ) hook = new CoinMigrator( );
     //else if( hookName == "MyHook" ) hook = new MyHook( );

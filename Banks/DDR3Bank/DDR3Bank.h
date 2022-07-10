@@ -46,6 +46,7 @@
 #include "include/NVMainRequest.h"
 #include "src/SubArray.h"
 #include "src/Stats.h"
+#include "src/MemoryController.h"
 
 #include <iostream>
 
@@ -93,7 +94,7 @@ class DDR3Bank : public Bank
     virtual void CalculatePower( );
     virtual double GetPower( ); 
 
-    virtual uint64_t GetOpenRow( ) { return openRow; }
+    virtual std::vector<RowBuffer> GetOpenRow( ) { return openRow; }
     virtual std::deque<ncounter_t>& GetOpenSubArray( ) { return activeSubArrayQueue; }
 
     virtual void SetName( std::string );
@@ -161,8 +162,9 @@ class DDR3Bank : public Bank
     ncounter_t reads, writes, activates, precharges, refreshes;
     ncounter_t idleTimer;
 
-    uint64_t openRow;
+    //uint64_t openRow;
 
+    std::vector<RowBuffer> openRow;
     ncounter_t bankId;
  
     virtual bool Activate( NVMainRequest *request );

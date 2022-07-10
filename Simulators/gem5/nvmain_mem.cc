@@ -54,12 +54,6 @@
 
 using namespace NVM;
 
-// This members are singleton values used to hold the main instance of
-// NVMain and it's wake/sleep (i.e., timing/atomic) status. These are
-// needed since NVMain assumes a contiguous address range while gem5
-// ISAs generally do not. The multiple instances allow for the gem5
-// AddrRanges to be used normally while this class remapped to NVMains
-// contiguous region.
 NVMainMemory *NVMainMemory::masterInstance = NULL;
 
 NVMainMemory::NVMainMemory(const Params *p)
@@ -74,6 +68,7 @@ NVMainMemory::NVMainMemory(const Params *p)
 
     char *saveptr1, *saveptr2;
 
+    m_eventDriven = false;
     nextEventCycle = 0;
 
     m_nvmainPtr = NULL;
@@ -87,6 +82,8 @@ NVMainMemory::NVMainMemory(const Params *p)
     std::cout << "NVMainControl: Reading NVMain config file: " << m_nvmainConfigPath << "." << std::endl;
 
     clock = clockPeriod( );
+
+    m_awake = false;
 
     m_avgAtomicLatency = 100.0f;
     m_numAtomicAccesses = 0;
@@ -147,6 +144,9 @@ NVMainMemory::init()
         m_nvmainEventQueue = new NVM::EventQueue( );
         m_nvmainGlobalEventQueue = new NVM::GlobalEventQueue( );
         m_tagGenerator = new NVM::TagGenerator( 1000 );
+
+        /* Main config file determines if we are event driven or not. */
+        m_nvmainConfig->GetBool( "EventDriven", m_eventDriven );
 
         m_nvmainConfig->SetSimInterface( m_nvmainSimInterface );
 
@@ -223,8 +223,9 @@ void NVMainMemory::startup()
      *  If we are in atomic/fast-forward, wakeup will be disabled upon
      *  the first atomic request receieved in recvAtomic().
      */
-    if (!masterInstance->clockEvent.scheduled())
-        schedule(masterInstance->clockEvent, curTick() + clock);
+    if( !m_eventDriven )
+        schedule(clockEvent, curTick() + clock);
+    m_awake = true;
 
     lastWakeup = curTick();
 }
@@ -234,8 +235,8 @@ void NVMainMemory::wakeup()
 {
     DPRINTF(NVMain, "NVMainMemory: wakeup() called.\n");
     DPRINTF(NVMainMin, "NVMainMemory: wakeup() called.\n");
-
-    schedule(masterInstance->clockEvent, clockEdge());
+    if( !m_eventDriven )
+        schedule(clockEvent, clockEdge());
 
     lastWakeup = curTick();
 }
@@ -256,10 +257,15 @@ void NVMainMemory::NVMainStatPrinter::process()
 {
     assert(nvmainPtr != NULL);
 
-    assert(curTick() >= memory->lastWakeup);
-    Tick stepCycles = (curTick() - memory->lastWakeup) / memory->clock;
+    if( memory->m_eventDriven )
+    {
+        assert(curTick() >= memory->lastWakeup);
+        Tick stepCycles = (curTick() - memory->lastWakeup) / memory->clock;
 
-    memory->m_nvmainGlobalEventQueue->Cycle( stepCycles );
+        //DPRINTF(NVMain, "NVMainMemory: Syncing global event queue for stat dump.");
+
+        memory->m_nvmainGlobalEventQueue->Cycle( stepCycles );
+    }
 
     nvmainPtr->CalculateStats();
     std::ostream& refStream = (statStream.is_open()) ? statStream : std::cout;
@@ -349,8 +355,13 @@ NVMainMemory::SetRequestData(NVMainRequest *request, PacketPtr pkt)
 Tick
 NVMainMemory::MemoryPort::recvAtomic(PacketPtr pkt)
 {
+#if NVM_GEM5_RV < 11284
+    if (pkt->memInhibitAsserted())
+        return 0;
+#else
     if (pkt->cacheResponding())
         return 0;
+#endif
 
     /*
      * calculate the latency. Now it is only random number
@@ -392,6 +403,14 @@ NVMainMemory::MemoryPort::recvAtomic(PacketPtr pkt)
 
         delete request;
     }
+    else
+    {
+        // If we switch back to atomic mode, disable the gem5 event
+        if( memory.m_awake )
+        {
+            memory.m_awake = false;
+        }
+    }
 
     /*
      * do the memory access to get the read data and change the response tag
@@ -427,10 +446,18 @@ NVMainMemory::MemoryPort::recvTimingReq(PacketPtr pkt)
         delete memory.pendingDelete[x];
     memory.pendingDelete.clear();
 
+#if NVM_GEM5_RV < 11284
+    if (pkt->memInhibitAsserted()) {
+        memory.pendingDelete.push_back(pkt);
+        return true;
+    }
+#else
     if (pkt->cacheResponding()) {
         memory.pendingDelete.push_back(pkt);
         return true;
     }
+#endif
+
 
     if (!pkt->isRead() && !pkt->isWrite()) {
         DPRINTF(NVMain, "NVMainMemory: Received a packet that is neither read nor write.\n");
@@ -442,8 +469,13 @@ NVMainMemory::MemoryPort::recvTimingReq(PacketPtr pkt)
         if (needsResponse) {
             assert(pkt->isResponse());
 
+#if NVM_GEM5_RV < 10405
+            pkt->busFirstWordDelay = pkt->busLastWordDelay = 0;
+#elif NVM_GEM5_RV < 10694
+            pkt->firstWordDelay = pkt->lastWordDelay = 0;
+#else
             pkt->headerDelay = pkt->payloadDelay = 0;
-
+#endif
             memory.responseQueue.push_back(pkt);
 
             memory.ScheduleResponse( );
@@ -462,8 +494,21 @@ NVMainMemory::MemoryPort::recvTimingReq(PacketPtr pkt)
         return false;
     }
 
+    // Make sure we are awake if we are in timing mode
+    if( !memory.m_awake )
+    {
+        memory.m_awake = true;
+        memory.wakeup();
+    }
+
     // Bus latency is modeled in NVMain.
+#if NVM_GEM5_RV < 10405
+    pkt->busFirstWordDelay = pkt->busLastWordDelay = 0;
+#elif NVM_GEM5_RV < 10694
+    pkt->firstWordDelay = pkt->lastWordDelay = 0;
+#else
     pkt->headerDelay = pkt->payloadDelay = 0;
+#endif
 
     NVMainRequest *request = new NVMainRequest( );
 
@@ -533,7 +578,8 @@ NVMainMemory::MemoryPort::recvTimingReq(PacketPtr pkt)
         /* See if we need to reschedule the wakeup event sooner. */
         ncycle_t nextEvent = memory.masterInstance->m_nvmainGlobalEventQueue->GetNextEvent(NULL);
         DPRINTF(NVMain, "NVMainMemory: Next event after issue is %d\n", nextEvent);
-        if( nextEvent < memory.nextEventCycle && masterInstance->clockEvent.scheduled() )
+        if( memory.m_eventDriven && nextEvent < memory.nextEventCycle
+            && memory.clockEvent.scheduled() )
         {
             ncycle_t currentCycle = memory.masterInstance->m_nvmainGlobalEventQueue->GetCurrentCycle();
 
@@ -552,8 +598,24 @@ NVMainMemory::MemoryPort::recvTimingReq(PacketPtr pkt)
             memory.nextEventCycle = nextEvent;
             memory.ScheduleClockEvent( nextWake );
         }
-        else if( !masterInstance->clockEvent.scheduled() )
+        else if( memory.m_eventDriven && !memory.clockEvent.scheduled() )
         {
+            /*while( true )
+            {
+                nextEvent = memory.masterInstance->m_nvmainGlobalEventQueue->GetNextEvent(NULL);
+
+                if( nextEvent == memory.masterInstance->m_nvmainGlobalEventQueue->GetCurrentCycle() )
+                {
+                    DPRINTF(NVMain, "NVMainMemory: Next event in same cycle (%d)!\n", nextEvent);
+
+                    memory.masterInstance->m_nvmainGlobalEventQueue->Cycle( 0 );
+                }
+                else
+                {
+                    break;
+                }
+            }*/
+
             ncycle_t currentCycle = memory.masterInstance->m_nvmainGlobalEventQueue->GetCurrentCycle();
 
             //assert(nextEvent >= currentCycle);
@@ -713,12 +775,20 @@ bool NVMainMemory::RequestComplete(NVM::NVMainRequest *req)
             if( (*retryIter)->retryRead && (isRead || isWrite) )
             {
                 (*retryIter)->retryRead = false;
+#if NVM_GEM5_RV < 10713
+                (*retryIter)->port.sendRetry();
+#else
                 (*retryIter)->port.sendRetryReq();
+#endif
             }
             if( (*retryIter)->retryWrite && (isRead || isWrite) )
             {
                 (*retryIter)->retryWrite = false;
+#if NVM_GEM5_RV < 10713
+                (*retryIter)->port.sendRetry();
+#else
                 (*retryIter)->port.sendRetryReq();
+#endif
             }
         }
 
@@ -809,10 +879,10 @@ void NVMainMemory::ScheduleResponse( )
 
 void NVMainMemory::ScheduleClockEvent( Tick nextWake )
 {
-    if( !masterInstance->clockEvent.scheduled() )
-        schedule(masterInstance->clockEvent, nextWake);
+    if( !clockEvent.scheduled() )
+        schedule(clockEvent, nextWake);
     else
-        reschedule(masterInstance->clockEvent, nextWake);
+        reschedule(clockEvent, nextWake);
 }
 
 
@@ -859,32 +929,60 @@ void NVMainMemory::tick( )
     // Cycle memory controller
     if (masterInstance == this)
     {
-        /* Keep NVMain in sync with gem5. */
-        assert(curTick() >= lastWakeup);
-        ncycle_t stepCycles = (curTick() - lastWakeup) / clock;
-
-        DPRINTF(NVMain, "NVMainMemory: Stepping %d cycles\n", stepCycles);
-        m_nvmainGlobalEventQueue->Cycle( stepCycles );
-
-        lastWakeup = curTick();
-
-        ncycle_t nextEvent;
-
-        nextEvent = m_nvmainGlobalEventQueue->GetNextEvent(NULL);
-        if( nextEvent != std::numeric_limits<ncycle_t>::max() )
+        if( !m_eventDriven )
         {
-            ncycle_t currentCycle = m_nvmainGlobalEventQueue->GetCurrentCycle();
+            m_nvmainPtr->Cycle( 1 );
 
-            assert(nextEvent >= currentCycle);
-            stepCycles = nextEvent - currentCycle;
+            if( m_awake || !m_request_map.empty() )
+            {
+                schedule(clockEvent, curTick() + clock);
+            }
+        }
+        else
+        {
+            /* Keep NVMain in sync with gem5. */
+            assert(curTick() >= lastWakeup);
+            ncycle_t stepCycles = (curTick() - lastWakeup) / clock;
 
-            Tick nextWake = curTick() + clock * static_cast<Tick>(stepCycles);
+            DPRINTF(NVMain, "NVMainMemory: Stepping %d cycles\n", stepCycles);
+            m_nvmainGlobalEventQueue->Cycle( stepCycles );
 
-            DPRINTF(NVMain, "NVMainMemory: Next event: %d CurrentCycle: %d\n", nextEvent, currentCycle);
-            DPRINTF(NVMain, "NVMainMemory: Schedule wake for %d\n", nextWake);
+            lastWakeup = curTick();
 
-            nextEventCycle = nextEvent;
-            ScheduleClockEvent( nextWake );
+            ncycle_t nextEvent;
+
+            /* Process any other events in the same cycle. */
+            /*while( true )
+            {
+                nextEvent = m_nvmainGlobalEventQueue->GetNextEvent(NULL);
+                if( nextEvent == m_nvmainGlobalEventQueue->GetCurrentCycle() )
+                {
+                    DPRINTF(NVMain, "NVMainMemory: Next event in same cycle (%d)!\n", nextEvent);
+
+                    m_nvmainGlobalEventQueue->Cycle( 0 );
+                }
+                else
+                {
+                    break;
+                }
+            }*/
+
+            nextEvent = m_nvmainGlobalEventQueue->GetNextEvent(NULL);
+            if( nextEvent != std::numeric_limits<ncycle_t>::max() )
+            {
+                ncycle_t currentCycle = m_nvmainGlobalEventQueue->GetCurrentCycle();
+
+                assert(nextEvent >= currentCycle);
+                stepCycles = nextEvent - currentCycle;
+
+                Tick nextWake = curTick() + clock * static_cast<Tick>(stepCycles);
+
+                DPRINTF(NVMain, "NVMainMemory: Next event: %d CurrentCycle: %d\n", nextEvent, currentCycle);
+                DPRINTF(NVMain, "NVMainMemory: Schedule wake for %d\n", nextWake);
+
+                nextEventCycle = nextEvent;
+                ScheduleClockEvent( nextWake );
+            }
         }
     }
 }

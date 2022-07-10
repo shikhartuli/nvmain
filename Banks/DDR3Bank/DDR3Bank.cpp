@@ -69,7 +69,8 @@ DDR3Bank::DDR3Bank( )
 
     state = DDR3BANK_CLOSED;
     lastActivate = 0;
-    openRow = 0;
+    //openRow = 0;
+    openRow.clear();
 
     bankEnergy = 0.0f;
     activeEnergy = 0.0f;
@@ -350,7 +351,11 @@ bool DDR3Bank::Activate( NVMainRequest *request )
     if( success )
     {
         /* bank-level update */
-        openRow = activateRow;
+        RowBuffer tmp;
+	tmp.openRow = activateRow;
+	tmp.age = 0;
+	openRow.push_back(tmp);
+	//openRow = activateRow;
         state = DDR3BANK_OPEN;
         activeSubArrayQueue.push_front( activateSubArray );
         activates++;
@@ -392,24 +397,26 @@ bool DDR3Bank::Read( NVMainRequest *request )
     {
         nextPowerDown = MAX( nextPowerDown, 
                              GetEventQueue()->GetCurrentCycle() 
-                                 + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+                                 //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
                                  + p->tAL + p->tRTP + p->tRP );
     }
     else
     {
         nextPowerDown = MAX( nextPowerDown, 
-                             MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                             + GetEventQueue()->GetCurrentCycle() + p->tRDPDEN );
+                             //MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+                             /*+*/ GetEventQueue()->GetCurrentCycle() + p->tRDPDEN );
     }
 
     nextRead = MAX( nextRead, 
-                    GetEventQueue()->GetCurrentCycle() 
-                        + MAX( p->tBURST, p->tCCD ) * request->burstCount );
+                    GetEventQueue()->GetCurrentCycle()
+			+ p->tCCD ); 
+                        //+ MAX( p->tBURST, p->tCCD ) * request->burstCount );
 
-    nextWrite = MAX( nextWrite, 
-                     GetEventQueue()->GetCurrentCycle()
-                         + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                         + p->tCAS + p->tBURST + p->tRTRS - p->tCWD );
+    // read/write are decoupled, read does not affect write
+    //nextWrite = MAX( nextWrite, 
+    //                 GetEventQueue()->GetCurrentCycle()
+    //                     + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+    //                     + p->tCAS + p->tBURST + p->tRTRS - p->tCWD );
 
     /* issue READ/READ_RECHARGE to the target subarray */
     bool success = GetChild( request )->IssueCommand( request );
@@ -436,7 +443,8 @@ bool DDR3Bank::Read( NVMainRequest *request )
                 state = DDR3BANK_CLOSED;
         } // if( request->type == READ_PRECHARGE )
 
-        dataCycles += p->tBURST;
+        dataCycles += 1;
+	//dataCycles += p->tBURST;
         reads++;
     } // if( succsss )
     else
@@ -477,33 +485,36 @@ bool DDR3Bank::Write( NVMainRequest *request )
     {
         nextPowerDown = MAX( nextActivate, 
                              GetEventQueue()->GetCurrentCycle()
-                             + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                             + p->tAL + p->tCWD + p->tBURST + p->tWR 
+                             //+ MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+                             + p->tAL + p->tCWD /*+ p->tBURST*/ + p->tWR 
                              + p->tRP );
     }
     /* else, no implicit precharge is enabled, simply update the timing */
     else
     {
         nextPowerDown = MAX( nextPowerDown, 
-                             MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                             + GetEventQueue()->GetCurrentCycle() + p->tWRPDEN );
+                             //MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+                             /*+*/ GetEventQueue()->GetCurrentCycle() + p->tWRPDEN );
     }
 
-    nextRead = MAX( nextRead, 
-                    GetEventQueue()->GetCurrentCycle() 
-                    + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
-                    + p->tCWD + p->tBURST + p->tWTR );
+    //decoupled read/write
+    //nextRead = MAX( nextRead, 
+    //                GetEventQueue()->GetCurrentCycle() 
+    //                + MAX( p->tBURST, p->tCCD ) * (request->burstCount - 1)
+    //                + p->tCWD + p->tBURST + p->tWTR );
 
     nextWrite = MAX( nextWrite, 
                      GetEventQueue()->GetCurrentCycle() 
-                     + MAX( p->tBURST, p->tCCD ) * request->burstCount );
+		     +  p->tCCD );
+                     //+ MAX( p->tBURST, p->tCCD ) * request->burstCount );
 
     /* issue WRITE/WRITE_PRECHARGE to the target subarray */
     bool success = GetChild( request )->IssueCommand( request );
 
     if( success )
     {
-        dataCycles += p->tBURST;
+	dataCycles += 1;
+        //dataCycles += p->tBURST;
         writeCycle = true;
         writes++;
 
@@ -994,7 +1005,7 @@ void DDR3Bank::CalculateStats( )
 
     double idealBandwidth;
 
-    idealBandwidth = (double)(p->CLK * p->RATE * p->BusWidth);
+    idealBandwidth = (double)(p->CLK * p->MULT * p->RATE * p->BPC);
 
     if( activeCycles != 0 )
         utilization = (double)((double)dataCycles / (double)(activeCycles + standbyCycles) );
